@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: purchasing-service-node
+  labels:
+    app: purchasing-service-node
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: purchasing-service-node
+  template:
+    metadata:
+      labels:
+        app: purchasing-service-node
+    spec:
+      initContainers:
+        - name: purchasing-migrate
+          image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - "npx sequelize-cli db:migrate"
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: port
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: password
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: name
+      containers:
+        - name: purchasing-service
+          image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+          ports:
+            - containerPort: 3017
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3017"
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: port
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: password
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-db
+                  key: name
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-rabbitmq
+                  key: url
+            - name: CORS_ORIGIN
+              value: "https://crm.noahsolution.com"
+            - name: INTERNAL_USER_ID
+              value: "00000000-0000-0000-0000-000000000000"
+            # Catálogos que consulta server-to-server (nombres de los Service de cada uno; ver su k8s/service.yaml).
+            - name: PRODUCT_SERVICE_URL
+              value: "http://product-service-node:3006"
+            - name: TAX_SERVICE_URL
+              value: "http://tax-service:3005"
+            - name: INVENTORY_SERVICE_URL
+              value: "http://inventory-service-node:3013"
+            - name: OTEL_SERVICE_NAME
+              value: "purchasing-service"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector.observability.svc.cluster.local:4318"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            # Sin `limits` a proposito: un tope de CPU de 300m estrangulaba al servicio (throttle)
+            # y las pruebas de stress-petitions medían el limite de Kubernetes, no la capacidad
+            # del codigo, con el nodo casi ocioso. Se conservan los `requests` (reserva).
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3017
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3017
+            initialDelaySeconds: 5
+            periodSeconds: 10

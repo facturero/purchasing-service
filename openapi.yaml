@@ -1,0 +1,354 @@
+openapi: 3.0.3
+info:
+  title: purchasing-service
+  version: 1.0.0
+  description: >-
+    Compras (plugins `inventory.suppliers` y `purchasing.purchase_orders`): proveedores y órdenes de compra con aprobación.
+    Todas las rutas van detrás del gateway con prefijo `/purchasing` (el gateway NO lo quita) y exigen el módulo contratado de cada
+    recurso. Importes SIEMPRE en centavos enteros; cantidades como TEXTO con hasta 6 decimales (`"10.5"`); fechas `AAAA-MM-DD`.
+    Una orden enviada no se edita: se cancela con motivo. Quien prepara una orden no la aprueba.
+servers:
+  - url: http://localhost:3017
+tags:
+  - name: Proveedores
+  - name: Órdenes de compra
+  - name: Política de aprobación
+security:
+  - gatewayHeaders: []
+paths:
+  /health:
+    get:
+      summary: Estado del servicio (sin prefijo ni contexto)
+      security: []
+      responses:
+        '200': { description: ok }
+  /purchasing/suppliers:
+    get:
+      tags: [Proveedores]
+      summary: Lista paginada de proveedores
+      description: 'Permiso: `supplier:read`. Busca por razón social, nombre comercial o identificación.'
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SupplierPage' } } } }
+    post:
+      tags: [Proveedores]
+      summary: Crea un proveedor
+      description: 'Permiso: `supplier:manage`. La identificación es única por organización (409 si ya existe).'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SupplierInput' } } }
+      responses:
+        '201': { description: Creado, content: { application/json: { schema: { $ref: '#/components/schemas/Supplier' } } } }
+        '409': { description: Ya existe un proveedor con esa identificación }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /purchasing/suppliers/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Proveedores]
+      summary: Un proveedor
+      description: 'Permiso: `supplier:read`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Supplier' } } } }
+        '404': { description: No existe (o es de otra organización) }
+    put:
+      tags: [Proveedores]
+      summary: Edita un proveedor (la identificación NO cambia)
+      description: 'Permiso: `supplier:manage`. Mandar `identification` o `identificationType` es un 422: las órdenes y retenciones ya la citan.'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/SupplierUpdate' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Supplier' } } } }
+        '404': { description: No existe }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /purchasing/suppliers/{id}/deactivate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Proveedores]
+      summary: Desactiva un proveedor (no recibe pedidos nuevos; no se borra)
+      description: 'Permiso: `supplier:manage`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Supplier' } } } }
+  /purchasing/suppliers/{id}/activate:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Proveedores]
+      summary: Reactiva un proveedor
+      description: 'Permiso: `supplier:manage`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Supplier' } } } }
+  /purchasing/orders:
+    get:
+      tags: [Órdenes de compra]
+      summary: Lista paginada de órdenes (sin líneas: `lineCount`)
+      description: 'Permiso: `purchase:read`. `q` busca en el número y en el nombre del proveedor.'
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/OrderStatus' } }
+        - { name: supplierId, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OrderPage' } } } }
+    post:
+      tags: [Órdenes de compra]
+      summary: Crea un borrador
+      description: >-
+        Permiso: `purchase:create`. Valida proveedor activo, bodega activa, productos activos y tarifas de IVA contra sus servicios; si
+        uno no responde, 502 `CATALOG_UNAVAILABLE`. La línea toma nombre, SKU y el IVA del producto si no se indican.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OrderInput' } } }
+      responses:
+        '201': { description: Creado, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '502': { description: Un catálogo (productos, impuestos, bodegas) no respondió }
+  /purchasing/orders/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Órdenes de compra]
+      summary: El detalle de una orden, con sus líneas
+      description: 'Permiso: `purchase:read`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '404': { description: No existe (o es de otra organización) }
+    put:
+      tags: [Órdenes de compra]
+      summary: Reemplaza un BORRADOR
+      description: 'Permiso: `purchase:create`. Solo en estado `draft`; otro estado es 409 `INVALID_ORDER_STATE`.'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/OrderInput' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '409': { description: No es un borrador, o la editó otra persona a la vez }
+  /purchasing/orders/{id}/submit:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Órdenes de compra]
+      summary: Envía el borrador
+      description: >-
+        Permiso: `purchase:create`. Le asigna el número `OC-AAAA-NNNNNN`. Según la política, queda `pending_approval` o `approved` (por
+        política, sin aprobador). Una orden de valor cero no se envía.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+  /purchasing/orders/{id}/approve:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Órdenes de compra]
+      summary: Aprueba una orden pendiente
+      description: 'Permiso: `purchase:approve`. Quien la preparó no la aprueba: 403 `SELF_APPROVAL_NOT_ALLOWED`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '403': { description: Es quien preparó la orden }
+        '409': { description: No está pendiente de aprobación }
+  /purchasing/orders/{id}/reject:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Órdenes de compra]
+      summary: Rechaza una orden pendiente, con motivo
+      description: 'Permiso: `purchase:approve`.'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Reason' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+  /purchasing/orders/{id}/reopen:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Órdenes de compra]
+      summary: Devuelve una orden rechazada a borrador
+      description: 'Permiso: `purchase:create`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+  /purchasing/orders/{id}/cancel:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Órdenes de compra]
+      summary: Cancela una orden, con motivo
+      description: >-
+        Permiso: `purchase:create` para borradores, pendientes y rechazadas; cancelar una orden YA aprobada exige además
+        `purchase:cancel`. No se cancela una orden que ya recibió mercadería.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Reason' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '403': { description: Está aprobada y falta `purchase:cancel` }
+  /purchasing/settings:
+    get:
+      tags: [Política de aprobación]
+      summary: La política de aprobación de la organización
+      description: 'Permiso: `purchase:read`. Sin configurar devuelve `approvalThresholdCents: null` (nunca se pide aprobación).'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } }
+    put:
+      tags: [Política de aprobación]
+      summary: Cambia la política
+      description: 'Permiso: `purchase:approve`. `approvalThresholdCents`: `null` = nunca; `0` = siempre; `N` = desde N centavos.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approvalThresholdCents: { type: integer, minimum: 0, nullable: true }
+                defaultWarehouseId: { type: string, format: uuid, nullable: true }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } }
+components:
+  securitySchemes:
+    gatewayHeaders:
+      type: apiKey
+      in: header
+      name: X-Organization-Id
+      description: El gateway inyecta `X-Organization-Id`, `X-User-Id`, `X-Country-Code` y `X-Permissions`; el servicio no ve el JWT.
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+  responses:
+    ValidationError:
+      description: La petición no es válida
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: { type: string, example: VALIDATION_ERROR }
+              message: { type: string }
+              details:
+                type: array
+                items: { type: object, properties: { field: { type: string }, message: { type: string } } }
+  schemas:
+    OrderStatus:
+      type: string
+      enum: [draft, pending_approval, approved, partially_received, received, closed, cancelled, rejected]
+    Reason:
+      type: object
+      required: [reason]
+      properties: { reason: { type: string, minLength: 3, maxLength: 300 } }
+    SupplierInput:
+      type: object
+      required: [identificationType, identification, legalName]
+      properties:
+        identificationType: { type: string, enum: [RUC, CEDULA, PASAPORTE, EXTERIOR] }
+        identification: { type: string, example: '1790012345001' }
+        legalName: { type: string }
+        tradeName: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        paymentTermDays: { type: integer, minimum: 0, maximum: 365, default: 0 }
+        relatedParty: { type: boolean, default: false }
+        notes: { type: string, nullable: true }
+    SupplierUpdate:
+      type: object
+      properties:
+        legalName: { type: string }
+        tradeName: { type: string, nullable: true }
+        email: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        paymentTermDays: { type: integer }
+        relatedParty: { type: boolean }
+        notes: { type: string, nullable: true }
+    Supplier:
+      allOf:
+        - $ref: '#/components/schemas/SupplierInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [active, inactive] }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+    SupplierPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Supplier' } }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+    OrderLineInput:
+      type: object
+      required: [productId, quantity, unitCostCents]
+      properties:
+        productId: { type: string, format: uuid }
+        description: { type: string, description: 'Si falta, el nombre del producto' }
+        quantity: { type: string, example: '10.5', description: 'Hasta 6 decimales' }
+        unitCostCents: { type: integer, minimum: 0 }
+        discountCents: { type: integer, minimum: 0 }
+        taxRateId: { type: string, format: uuid, nullable: true, description: 'Omitido: el IVA del producto; null: sin impuesto' }
+    OrderInput:
+      type: object
+      required: [supplierId, warehouseId, lines]
+      properties:
+        supplierId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid, nullable: true }
+        currencyCode: { type: string, example: USD }
+        orderDate: { type: string, format: date, description: 'Por defecto, hoy en Ecuador' }
+        expectedDate: { type: string, format: date, nullable: true }
+        paymentTermDays: { type: integer, description: 'Por defecto, los días del proveedor' }
+        notes: { type: string, nullable: true }
+        lines: { type: array, minItems: 1, maxItems: 200, items: { $ref: '#/components/schemas/OrderLineInput' } }
+    OrderLine:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        lineNumber: { type: integer }
+        productId: { type: string, format: uuid }
+        sku: { type: string, nullable: true }
+        description: { type: string }
+        quantity: { type: string }
+        unitCostCents: { type: integer }
+        discountCents: { type: integer }
+        taxRateId: { type: string, format: uuid, nullable: true }
+        taxPercent: { type: string, example: '15.00' }
+        subtotalCents: { type: integer }
+        taxCents: { type: integer }
+        totalCents: { type: integer }
+        receivedQuantity: { type: string }
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, nullable: true, example: OC-2026-000042 }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        supplierId: { type: string, format: uuid }
+        supplier: { type: object, properties: { identificationType: { type: string }, identification: { type: string }, legalName: { type: string } } }
+        warehouseId: { type: string, format: uuid }
+        currencyCode: { type: string }
+        orderDate: { type: string, format: date }
+        expectedDate: { type: string, format: date, nullable: true }
+        paymentTermDays: { type: integer }
+        notes: { type: string, nullable: true }
+        subtotalCents: { type: integer }
+        taxCents: { type: integer }
+        totalCents: { type: integer }
+        lineCount: { type: integer }
+        lines: { type: array, items: { $ref: '#/components/schemas/OrderLine' }, description: 'Solo en el detalle' }
+        createdBy: { type: string, format: uuid }
+        approvedBy: { type: string, format: uuid, nullable: true }
+        approvedByPolicy: { type: boolean }
+        rejectionReason: { type: string, nullable: true }
+        cancelReason: { type: string, nullable: true }
+        version: { type: integer }
+    OrderPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Order' } }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+    Settings:
+      type: object
+      properties:
+        approvalThresholdCents: { type: integer, nullable: true }
+        defaultWarehouseId: { type: string, format: uuid, nullable: true }
+        updatedAt: { type: string, format: date-time }

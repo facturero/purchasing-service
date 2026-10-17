@@ -1,0 +1,111 @@
+asyncapi: 2.6.0
+info:
+  title: purchasing-service — eventos
+  version: 1.0.0
+  description: >-
+    purchasing-service PUBLICA estos eventos en el exchange `crm.events` (patrón Outbox, @facturero/outbox-relay). Todavía no consume
+    ninguno. Todo payload lleva `organizationId` y, añadidos por el relay, actor, IP y request-id. Los importes van en centavos de la
+    moneda de la orden; las cantidades, como texto (hasta 6 decimales).
+channels:
+  purchasing.supplier.upserted:
+    publish:
+      summary: Alta o cambio de un proveedor (un solo tipo: quien lo consume guarda el último estado)
+      message:
+        payload:
+          type: object
+          properties:
+            supplierId: { type: string, format: uuid }
+            identificationType: { type: string, enum: [RUC, CEDULA, PASAPORTE, EXTERIOR] }
+            identification: { type: string }
+            legalName: { type: string }
+            tradeName: { type: string, nullable: true }
+            paymentTermDays: { type: integer }
+            relatedParty: { type: boolean }
+            status: { type: string, enum: [active, inactive] }
+            previousStatus: { type: string, description: Solo al activar o desactivar }
+  purchasing.order.created:
+    publish:
+      summary: Se creó un borrador de orden de compra
+      message: { $ref: '#/components/messages/Order' }
+  purchasing.order.updated:
+    publish:
+      summary: Se editó un borrador
+      message: { $ref: '#/components/messages/Order' }
+  purchasing.order.submitted:
+    publish:
+      summary: El borrador se envió (ya tiene número). `needsApproval` dice si espera a otra persona.
+      message: { $ref: '#/components/messages/Order' }
+  purchasing.order.approved:
+    publish:
+      summary: Orden aprobada — el compromiso de compra con el proveedor
+      description: >-
+        La aprueba otra persona o, si la política de la organización no exigía aprobación para ese monto, queda aprobada al enviarse
+        (`approvedByPolicy: true`, sin `approvedBy`). Lleva las líneas para quien deba prever la entrada de mercadería o el compromiso
+        de gasto.
+      message:
+        payload:
+          allOf:
+            - $ref: '#/components/schemas/OrderPayload'
+            - type: object
+              properties:
+                approvedBy: { type: string, format: uuid, nullable: true }
+                approvedAt: { type: string, format: date-time }
+                approvedByPolicy: { type: boolean }
+                expectedDate: { type: string, format: date, nullable: true }
+                lines:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      productId: { type: string, format: uuid }
+                      quantity: { type: string, example: '10.5' }
+                      unitCostCents: { type: integer }
+                      subtotalCents: { type: integer }
+                      taxCents: { type: integer }
+  purchasing.order.rejected:
+    publish:
+      summary: Una persona rechazó la orden (vuelve a borrador al reabrirla)
+      message: { $ref: '#/components/messages/Order' }
+  purchasing.order.reopened:
+    publish:
+      summary: Una orden rechazada volvió a borrador
+      message: { $ref: '#/components/messages/Order' }
+  purchasing.order.cancelled:
+    publish:
+      summary: Orden cancelada, con motivo
+      message: { $ref: '#/components/messages/Order' }
+  purchasing.settings.updated:
+    publish:
+      summary: Cambió la política de aprobación o la bodega por defecto
+      message:
+        payload:
+          type: object
+          properties:
+            approvalThresholdCents: { type: integer, nullable: true, description: 'null = nunca se pide aprobación' }
+            defaultWarehouseId: { type: string, format: uuid, nullable: true }
+components:
+  schemas:
+    OrderPayload:
+      type: object
+      properties:
+        orderId: { type: string, format: uuid }
+        number: { type: string, nullable: true, example: OC-2026-000042 }
+        status: { type: string }
+        supplierId: { type: string, format: uuid }
+        supplierName: { type: string }
+        warehouseId: { type: string, format: uuid }
+        establishmentId: { type: string, format: uuid, nullable: true }
+        currencyCode: { type: string, example: USD }
+        orderDate: { type: string, format: date }
+        subtotalCents: { type: integer }
+        taxCents: { type: integer }
+        totalCents: { type: integer }
+        lineCount: { type: integer }
+        createdBy: { type: string, format: uuid }
+        rejectionReason: { type: string, description: Solo en `rejected` }
+        cancelReason: { type: string, description: Solo en `cancelled` }
+        needsApproval: { type: boolean, description: Solo en `submitted` }
+  messages:
+    Order:
+      payload:
+        $ref: '#/components/schemas/OrderPayload'
