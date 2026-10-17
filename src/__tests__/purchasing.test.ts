@@ -108,7 +108,11 @@ describe('crear y editar una orden', () => {
   });
 
   it.each([
-    ['proveedor inexistente', (id: string) => orderRequest(id.replace(/.$/, '0'))],
+    ['proveedor inexistente', (id: string) => {
+      const last = id[id.length - 1] ?? '0';
+      const mutated = id.slice(0, -1) + (last === '0' ? '1' : '0');
+      return orderRequest(mutated);
+    }],
     ['bodega inexistente', (id: string) => orderRequest(id, { warehouseId: '00000000-0000-4000-8000-000000000000' })],
     ['producto inexistente', (id: string) => orderRequest(id, { lines: [lineRequest({ productId: '00000000-0000-4000-8000-000000000000' })] })],
     ['tarifa inexistente', (id: string) => orderRequest(id, { lines: [lineRequest({ taxRateId: '00000000-0000-4000-8000-000000000000' })] })],
