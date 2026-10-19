@@ -9,7 +9,7 @@ info:
 channels:
   purchasing.supplier.upserted:
     publish:
-      summary: Alta o cambio de un proveedor (un solo tipo: quien lo consume guarda el último estado)
+      summary: 'Alta o cambio de un proveedor (un solo tipo: quien lo consume guarda el último estado)'
       message:
         payload:
           type: object
@@ -83,7 +83,123 @@ channels:
           properties:
             approvalThresholdCents: { type: integer, nullable: true, description: 'null = nunca se pide aprobación' }
             defaultWarehouseId: { type: string, format: uuid, nullable: true }
+            overReceiptToleranceBp: { type: integer, description: 'Tolerancia de sobre-recepción en puntos básicos' }
+
+  purchasing.order.received:
+    publish:
+      summary: Orden de compra recibida en su totalidad (todas las líneas de producto completadas)
+      message:
+        payload:
+          $ref: '#/components/schemas/OrderPayload'
+
+  purchasing.order.closed:
+    publish:
+      summary: Orden cerrada manualmente (lo pendiente se da por terminado)
+      message:
+        payload:
+          type: object
+          properties:
+            orderId: { type: string, format: uuid }
+            reason: { type: string }
+
+  purchasing.receipt.posted:
+    publish:
+      summary: Recepción de mercadería registrada (resumen para auditoría y terceros)
+      message:
+        payload:
+          type: object
+          properties:
+            receiptId: { type: string, format: uuid }
+            receiptNumber: { type: string, example: 'RM-2026-000001' }
+            orderId: { type: string, format: uuid }
+            orderNumber: { type: string, nullable: true }
+            supplierId: { type: string, format: uuid }
+            warehouseId: { type: string, format: uuid }
+            lineCount: { type: integer }
+            totalCostCents: { type: integer }
+
+  purchasing.bill.created:
+    publish:
+      summary: Factura de compra creada (borrador)
+      message:
+        payload:
+          $ref: '#/components/schemas/BillPayload'
+
+  purchasing.bill.updated:
+    publish:
+      summary: Factura de compra actualizada (borrador)
+      message:
+        payload:
+          $ref: '#/components/schemas/BillPayload'
+
+  purchasing.bill.posted:
+    publish:
+      summary: Factura de compra contabilizada (evento de negocio para accounting)
+      message:
+        payload:
+          $ref: '#/components/schemas/BillPayload'
+
+  purchasing.bill.blocked:
+    publish:
+      summary: Factura bloqueada por conciliación a tres vías
+      message:
+        payload:
+          type: object
+          properties:
+            $ref: '#/components/schemas/BillPayload'
+            matchReasons: { type: array, items: { type: object } }
+
+  purchasing.bill.overridden:
+    publish:
+      summary: Factura aprobada con excepción (override por otra persona)
+      message:
+        payload:
+          type: object
+          properties:
+            $ref: '#/components/schemas/BillPayload'
+            overrideReason: { type: string }
+            overrideBy: { type: string, format: uuid }
+
+  purchasing.bill.voided:
+    publish:
+      summary: Factura de compra anulada
+      message:
+        payload:
+          type: object
+          properties:
+            $ref: '#/components/schemas/BillPayload'
+            voidReason: { type: string }
+
+  purchase.purchase_order.received:
+    publish:
+      summary: 'Contrato con inventory-service: mercadería recibida, entra a stock con el costo de la orden'
+      message:
+        payload:
+          type: object
+          properties:
+            purchaseOrderId: { type: string, format: uuid }
+            organizationId: { type: string, format: uuid }
+            warehouseId: { type: string, format: uuid }
+            receiptId: { type: string, format: uuid }
+            receiptNumber: { type: string }
+            lines:
+              type: array
+              items:
+                type: object
+                properties:
+                  productId: { type: string, format: uuid }
+                  quantity: { type: string }
+                  unitCostCents: { type: integer }
+                  currencyCode: { type: string }
 components:
+  messages:
+    Order:
+      payload:
+        $ref: '#/components/schemas/OrderPayload'
+    Bill:
+      payload:
+        $ref: '#/components/schemas/BillPayload'
+
   schemas:
     OrderPayload:
       type: object
@@ -105,7 +221,35 @@ components:
         rejectionReason: { type: string, description: Solo en `rejected` }
         cancelReason: { type: string, description: Solo en `cancelled` }
         needsApproval: { type: boolean, description: Solo en `submitted` }
-  messages:
-    Order:
-      payload:
-        $ref: '#/components/schemas/OrderPayload'
+
+    BillPayload:
+      type: object
+      properties:
+        billId: { type: string, format: uuid }
+        internalNumber: { type: string, nullable: true, example: FC-2026-000001 }
+        supplierId: { type: string, format: uuid }
+        supplier: { type: object, properties: { identification: { type: string }, legalName: { type: string } } }
+        docType: { type: string, example: '01' }
+        supplierDocument: { type: string, example: '001-001-000000123' }
+        issueDate: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        currencyCode: { type: string, example: USD }
+        subtotalCents: { type: integer }
+        taxCents: { type: integer }
+        totalCents: { type: integer }
+        establishmentId: { type: string, format: uuid, nullable: true }
+        orderId: { type: string, format: uuid, nullable: true }
+        matchStatus: { type: string, enum: [matched, blocked, overridden, not_applicable] }
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string, enum: [stock, expense] }
+              productId: { type: string, format: uuid, nullable: true }
+              expenseAccountHint: { type: string, nullable: true }
+              subtotalCents: { type: integer }
+              vatCents: { type: integer }
+              iceCents: { type: integer }
+              irbpnrCents: { type: integer }
+              priceVarianceCents: { type: integer }

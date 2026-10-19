@@ -11,28 +11,49 @@ import type {
   ApproveOrderUseCase,
   CancelOrderUseCase,
   CreateOrderUseCase,
+  GetOrderReceivingUseCase,
   GetOrderUseCase,
+  GetReceiptUseCase,
   ListOrdersUseCase,
+  ListReceiptsUseCase,
   RejectOrderUseCase,
   ReopenOrderUseCase,
   SubmitOrderUseCase,
   UpdateOrderUseCase,
 } from '../../application/use-cases/order-use-cases.js';
+import type { ReceiveOrderUseCase } from '../../application/use-cases/receive-order-use-case.js';
+import type { CloseOrderUseCase } from '../../application/use-cases/close-order-use-case.js';
+import type {
+  CreateBillUseCase,
+  GetBillUseCase,
+  ListBillsUseCase,
+  OverrideBillUseCase,
+  PostBillUseCase,
+  UpdateBillUseCase,
+  VoidBillUseCase,
+} from '../../application/use-cases/bill-use-cases.js';
 import type { GetSettingsUseCase, UpdateSettingsUseCase } from '../../application/use-cases/settings-use-cases.js';
+import type { IssueBillWithholdingUseCase } from '../../application/use-cases/withholding-use-cases.js';
 import type { OrderStatus } from '../../domain/purchase-order.js';
 import { type ContextVariables, requireOrganization, requirePermission, requireUser } from './middlewares.js';
 import {
+  billQuerySchema,
+  billSchema,
   orderQuerySchema,
   orderSchema,
+  overrideSchema,
   reasonSchema,
+  receiptQuerySchema,
+  receiptSchema,
   settingsSchema,
   supplierQuerySchema,
   supplierSchema,
   updateSupplierSchema,
   validateJson,
   validateQuery,
+  voidSchema,
 } from './validators.js';
-import { toOrderJSON, toSettingsJSON, toSupplierJSON } from './serializers.js';
+import { toBillJSON, toOrderJSON, toReceiptJSON, toSettingsJSON, toSupplierJSON } from './serializers.js';
 
 type Vars = { Variables: ContextVariables };
 type Ctx = Context<Vars>;
@@ -48,6 +69,16 @@ export interface AppDependencies {
     setSupplierStatus: SetSupplierStatusUseCase;
     listOrders: ListOrdersUseCase;
     getOrder: GetOrderUseCase;
+    getOrderReceiving: GetOrderReceivingUseCase;
+    getReceipt: GetReceiptUseCase;
+    listReceipts: ListReceiptsUseCase;
+    listBills: ListBillsUseCase;
+    getBill: GetBillUseCase;
+    createBill: CreateBillUseCase;
+    updateBill: UpdateBillUseCase;
+    postBill: PostBillUseCase;
+    overrideBill: OverrideBillUseCase;
+    voidBill: VoidBillUseCase;
     createOrder: CreateOrderUseCase;
     updateOrder: UpdateOrderUseCase;
     submitOrder: SubmitOrderUseCase;
@@ -55,6 +86,9 @@ export interface AppDependencies {
     rejectOrder: RejectOrderUseCase;
     reopenOrder: ReopenOrderUseCase;
     cancelOrder: CancelOrderUseCase;
+    receiveOrder: ReceiveOrderUseCase;
+    closeOrder: CloseOrderUseCase;
+    issueBillWithholding: IssueBillWithholdingUseCase;
   };
   corsOrigin: string;
 }
@@ -148,6 +182,85 @@ export function purchasingRoutes(deps: AppDependencies): Hono<Vars> {
       organizationId: org(c), orderId: c.req.param('id'), userId: user(c), reason: (c.req.valid('json' as never) as z.infer<typeof reasonSchema>).reason,
       allowApproved: can(c, 'purchase:cancel'),
     }))));
+
+  // ── Recepción de mercadería ─────────────────────────────────────────────────
+  r.post('/purchasing/orders/:id/receipts', ...base, requireUser(), requirePermission('receipt:create'), validateJson(receiptSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof receiptSchema>;
+    const { order, receiptId, receiptNumber } = await uc.receiveOrder.execute({
+      organizationId: org(c),
+      input: { ...input, orderId: c.req.param('id'), userId: user(c) },
+    });
+    return c.json({ ...toOrderJSON(order), receiptId, receiptNumber }, 201);
+  });
+
+  r.get('/purchasing/receipts', ...base, requirePermission('purchase:read'), validateQuery(receiptQuerySchema), async (c) => {
+    const q = c.req.valid('query' as never) as z.infer<typeof receiptQuerySchema>;
+    const page = await uc.listReceipts.execute({ organizationId: org(c), filters: q });
+    return c.json({ ...page, items: page.items.map(toReceiptJSON) });
+  });
+
+  r.get('/purchasing/receipts/:id', ...base, requirePermission('purchase:read'), async (c) =>
+    c.json(toReceiptJSON(await uc.getReceipt.execute({ organizationId: org(c), receiptId: c.req.param('id') }))));
+
+  r.get('/purchasing/orders/:id/receiving', ...base, requirePermission('purchase:read'), async (c) =>
+    c.json(await uc.getOrderReceiving.execute({ organizationId: org(c), orderId: c.req.param('id') })));
+
+  // ── Cierre manual de orden ──────────────────────────────────────────────────
+  r.post('/purchasing/orders/:id/close', ...base, requireUser(), requirePermission('purchase:close'), validateJson(reasonSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof reasonSchema>;
+    const order = await uc.closeOrder.execute({
+      organizationId: org(c),
+      input: { orderId: c.req.param('id'), userId: user(c), reason: input.reason },
+    });
+    return c.json(toOrderJSON(order));
+  });
+
+  // ── Factura de compra (conciliación a tres vías) ────────────────────────────
+  r.get('/purchasing/bills', ...base, requirePermission('purchase_bill:read'), validateQuery(billQuerySchema), async (c) => {
+    const q = c.req.valid('query' as never) as z.infer<typeof billQuerySchema>;
+    const page = await uc.listBills.execute({ organizationId: org(c), filters: q });
+    return c.json({ ...page, items: page.items.map((b) => toBillJSON(b, { withLines: false })) });
+  });
+
+  r.post('/purchasing/bills', ...base, requireUser(), requirePermission('purchase_bill:create'), validateJson(billSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof billSchema>;
+    const bill = await uc.createBill.execute({
+      organizationId: org(c),
+      userId: user(c),
+      input: { ...input, supplierTotalCents: input.supplierTotalCents },
+    });
+    return c.json(toBillJSON(bill), 201);
+  });
+
+  r.get('/purchasing/bills/:id', ...base, requirePermission('purchase_bill:read'), async (c) =>
+    c.json(toBillJSON(await uc.getBill.execute({ organizationId: org(c), billId: c.req.param('id') }))));
+
+  r.put('/purchasing/bills/:id', ...base, requireUser(), requirePermission('purchase_bill:create'), validateJson(billSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof billSchema>;
+    const bill = await uc.updateBill.execute({
+      organizationId: org(c),
+      billId: c.req.param('id'),
+      input: { ...input, supplierTotalCents: input.supplierTotalCents },
+    });
+    return c.json(toBillJSON(bill));
+  });
+
+  r.post('/purchasing/bills/:id/post', ...base, requireUser(), requirePermission('purchase_bill:create'), async (c) => {
+    const bill = await uc.postBill.execute({ organizationId: org(c), billId: c.req.param('id') });
+    return c.json(toBillJSON(bill));
+  });
+
+  r.post('/purchasing/bills/:id/override', ...base, requireUser(), requirePermission('purchase_bill:override'), validateJson(overrideSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof overrideSchema>;
+    const bill = await uc.overrideBill.execute({ organizationId: org(c), billId: c.req.param('id'), userId: user(c), reason: input.reason });
+    return c.json(toBillJSON(bill));
+  });
+
+  r.post('/purchasing/bills/:id/void', ...base, requireUser(), requirePermission('purchase_bill:void'), validateJson(voidSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof voidSchema>;
+    const bill = await uc.voidBill.execute({ organizationId: org(c), billId: c.req.param('id'), userId: user(c), reason: input.reason });
+    return c.json(toBillJSON(bill));
+  });
 
   return r;
 }

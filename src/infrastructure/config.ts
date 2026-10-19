@@ -17,6 +17,8 @@ const schema = z.object({
   PRODUCT_SERVICE_URL: z.string().default('http://product-service:3006'),
   TAX_SERVICE_URL: z.string().default('http://tax-service:3005'),
   INVENTORY_SERVICE_URL: z.string().default('http://inventory-service:3013'),
+  // fiscal-ecuador: emite las retenciones (E.1) y llama de vuelta cuando autoriza.
+  FISCAL_SERVICE_URL: z.string().default('http://fiscal-ecuador-node:3010'),
 });
 
 const parsed = schema.safeParse(process.env);

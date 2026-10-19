@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  FiscalPort,
   ProductCatalogPort,
   ProductInfo,
   TaxRatePort,
@@ -11,8 +12,11 @@ import {
   ApproveOrderUseCase,
   CancelOrderUseCase,
   CreateOrderUseCase,
+  GetOrderReceivingUseCase,
   GetOrderUseCase,
+  GetReceiptUseCase,
   ListOrdersUseCase,
+  ListReceiptsUseCase,
   RejectOrderUseCase,
   ReopenOrderUseCase,
   SubmitOrderUseCase,
@@ -22,6 +26,18 @@ import {
   type OrderRequest,
 } from '../application/use-cases/order-use-cases.js';
 import { GetSettingsUseCase, UpdateSettingsUseCase } from '../application/use-cases/settings-use-cases.js';
+import { CloseOrderUseCase } from '../application/use-cases/close-order-use-case.js';
+import { ReceiveOrderUseCase } from '../application/use-cases/receive-order-use-case.js';
+import {
+  CreateBillUseCase,
+  GetBillUseCase,
+  ListBillsUseCase,
+  OverrideBillUseCase,
+  PostBillUseCase,
+  UpdateBillUseCase,
+  VoidBillUseCase,
+} from '../application/use-cases/bill-use-cases.js';
+import { IssueBillWithholdingUseCase } from '../application/use-cases/withholding-use-cases.js';
 import {
   CreateSupplierUseCase,
   GetSupplierUseCase,
@@ -29,13 +45,20 @@ import {
   SetSupplierStatusUseCase,
   UpdateSupplierUseCase,
 } from '../application/use-cases/supplier-use-cases.js';
-import { CatalogUnavailableError, ConcurrentUpdateError } from '../domain/errors.js';
+import { CatalogUnavailableError, ConcurrentUpdateError, FiscalServiceUnavailableError } from '../domain/errors.js';
 import type { PurchaseOrder } from '../domain/purchase-order.js';
+import type { BillLine, PurchaseBill } from '../domain/purchase-bill.js';
 import type {
+  BillFilters,
+  BillRepository,
   DomainEvent,
+  GoodsReceipt,
+  GoodsReceiptLine,
   OrderRepository,
   Page,
   PurchasingSettings,
+  ReceiptFilters,
+  ReceiptRepository,
   SettingsRepository,
   SupplierRepository,
   UnitOfWork,
@@ -59,8 +82,14 @@ const clone = <T>(value: T): T => structuredClone(value);
 interface Snapshot {
   suppliers: Map<string, Supplier>;
   orders: Map<string, PurchaseOrder>;
+  receipts: Map<string, GoodsReceipt>;
+  receiptLines: Map<string, GoodsReceiptLine[]>;
+  bills: Map<string, PurchaseBill>;
+  billLines: Map<string, BillLine[]>;
   settings: Map<string, PurchasingSettings>;
   sequences: Map<string, number>;
+  billSequences: Map<string, number>;
+  receiptSequences: Map<string, number>;
   outboxLength: number;
 }
 
@@ -68,8 +97,14 @@ interface Snapshot {
 export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
   supplierMap = new Map<string, Supplier>();
   orderMap = new Map<string, PurchaseOrder>();
+  receiptMap = new Map<string, GoodsReceipt>();
+  receiptLineMap = new Map<string, GoodsReceiptLine[]>();
+  billMap = new Map<string, PurchaseBill>();
+  billLineMap = new Map<string, BillLine[]>();
   settingsMap = new Map<string, PurchasingSettings>();
   sequences = new Map<string, number>();
+  billSequences = new Map<string, number>();
+  receiptSequences = new Map<string, number>();
   readonly outboxEvents: DomainEvent[] = [];
   private stack: Snapshot[] = [];
 
@@ -125,6 +160,114 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
     },
   };
 
+  readonly receipts: ReceiptRepository = {
+    findById: async (org, id) => {
+      const r = this.receiptMap.get(id);
+      if (!r || r.organizationId !== org) return null;
+      return clone({ ...r, lines: this.receiptLineMap.get(id) ?? [] });
+    },
+    findByNumber: async (org, number) => {
+      const found = [...this.receiptMap.values()].find((r) => r.organizationId === org && r.number === number);
+      return found ? clone(found) : null;
+    },
+    list: async (org, f: ReceiptFilters) => {
+      const q = f.q?.toLowerCase();
+      const all = [...this.receiptMap.values()]
+        .filter((r) => r.organizationId === org)
+        .filter((r) => !f.purchaseOrderId || r.purchaseOrderId === f.purchaseOrderId)
+        .filter((r) => !f.supplierId || r.supplierId === f.supplierId)
+        .filter((r) => !f.from || r.receiptDate >= f.from)
+        .filter((r) => !f.to || r.receiptDate <= f.to)
+        .filter((r) => !q || (r.number ?? '').toLowerCase().includes(q))
+        .sort((a, b) => (a.receiptDate < b.receiptDate ? 1 : -1));
+      return paginate(all.map(clone), f.page, f.pageSize);
+    },
+    save: async (r) => {
+      this.receiptMap.set(r.id, clone({ ...r, lines: undefined }));
+    },
+    saveLines: async (lines) => {
+      if (!lines.length) return;
+      const receiptId = lines[0]!.receiptId;
+      this.receiptLineMap.set(receiptId, clone(lines));
+    },
+    nextReceiptSequence: async (org, year) => {
+      const key = `${org}|${year}`;
+      const next = (this.receiptSequences.get(key) ?? 0) + 1;
+      this.receiptSequences.set(key, next);
+      return next;
+    },
+  };
+
+  readonly bills: BillRepository = {
+    findById: async (org, id) => {
+      const b = this.billMap.get(id);
+      if (!b || b.organizationId !== org) return null;
+      return clone({ ...b, lines: this.billLineMap.get(id) ?? [] });
+    },
+    findBySupplierDocument: async (org, supplierId, docType, establishment, emissionPoint, sequential) => {
+      const found = [...this.billMap.values()].find(
+        (b) =>
+          b.organizationId === org &&
+          b.supplierId === supplierId &&
+          b.docType === docType &&
+          b.establishment === establishment &&
+          b.emissionPoint === emissionPoint &&
+          b.sequential === sequential,
+      );
+      return found ? clone(found) : null;
+    },
+    findByAuthorization: async (org, authorizationNumber) => {
+      const found = [...this.billMap.values()].find((b) => b.organizationId === org && b.authorizationNumber === authorizationNumber);
+      return found ? clone(found) : null;
+    },
+    list: async (org, f: BillFilters) => {
+      const q = f.q?.toLowerCase();
+      const all = [...this.billMap.values()]
+        .filter((b) => b.organizationId === org)
+        .filter((b) => !f.supplierId || b.supplierId === f.supplierId)
+        .filter((b) => !f.status || b.status === f.status)
+        .filter((b) => !f.matchStatus || b.matchStatus === f.matchStatus)
+        .filter((b) => !f.purchaseOrderId || b.purchaseOrderId === f.purchaseOrderId)
+        .filter((b) => !f.from || b.issueDate >= f.from)
+        .filter((b) => !f.to || b.issueDate <= f.to)
+        .filter((b) => !q || b.supplier.legalName.toLowerCase().includes(q) || `${b.establishment}-${b.emissionPoint}-${b.sequential}`.includes(q))
+        .sort((a, b) => (a.issueDate < b.issueDate ? 1 : -1));
+      return paginate(
+        all.map((b) => clone({ ...b, lines: this.billLineMap.get(b.id) ?? [] })),
+        f.page,
+        f.pageSize,
+      );
+    },
+    save: async (bill: PurchaseBill, expectedVersion?: number | null) => {
+      const existing = this.billMap.get(bill.id);
+      if (expectedVersion === null && existing) throw new ConcurrentUpdateError();
+      if (typeof expectedVersion === 'number' && (!existing || existing.version !== expectedVersion)) throw new ConcurrentUpdateError();
+      this.billMap.set(bill.id, clone({ ...bill, lines: [] }));
+    },
+    saveLines: async (billId: string, _org: string, lines: BillLine[]) => {
+      this.billLineMap.set(billId, clone(lines));
+    },
+    billedByOrderLine: async (org: string, purchaseOrderId: string, excludeBillId?: string) => {
+      const map = new Map<string, bigint>();
+      for (const bill of this.billMap.values()) {
+        if (bill.organizationId !== org || bill.purchaseOrderId !== purchaseOrderId) continue;
+        if (bill.status !== 'posted' && bill.status !== 'blocked') continue;
+        if (excludeBillId && bill.id === excludeBillId) continue;
+        for (const line of this.billLineMap.get(bill.id) ?? []) {
+          if (!line.orderLineId) continue;
+          map.set(line.orderLineId, (map.get(line.orderLineId) ?? 0n) + line.quantityMicros);
+        }
+      }
+      return map;
+    },
+    nextBillSequence: async (org, year) => {
+      const key = `${org}|${year}`;
+      const next = (this.billSequences.get(key) ?? 0) + 1;
+      this.billSequences.set(key, next);
+      return next;
+    },
+  };
+
   readonly settings: SettingsRepository = {
     find: async (org) => {
       const s = this.settingsMap.get(org);
@@ -145,13 +288,21 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
     this.stack.push({
       suppliers: clone(this.supplierMap),
       orders: clone(this.orderMap),
+      receipts: clone(this.receiptMap),
+      receiptLines: clone(this.receiptLineMap),
+      bills: clone(this.billMap),
+      billLines: clone(this.billLineMap),
       settings: clone(this.settingsMap),
       sequences: clone(this.sequences),
+      billSequences: clone(this.billSequences),
+      receiptSequences: clone(this.receiptSequences),
       outboxLength: this.outboxEvents.length,
     });
     return {
       suppliers: this.suppliers,
       orders: this.orders,
+      receipts: this.receipts,
+      bills: this.bills,
       settings: this.settings,
       outbox: this.outbox,
       commit: async () => {
@@ -162,8 +313,14 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
         if (!snap) return;
         this.supplierMap = snap.suppliers;
         this.orderMap = snap.orders;
+        this.receiptMap = snap.receipts;
+        this.receiptLineMap = snap.receiptLines;
+        this.billMap = snap.bills;
+        this.billLineMap = snap.billLines;
         this.settingsMap = snap.settings;
         this.sequences = snap.sequences;
+        this.billSequences = snap.billSequences;
+        this.receiptSequences = snap.receiptSequences;
         this.outboxEvents.length = snap.outboxLength;
       },
     };
@@ -206,11 +363,28 @@ export class FakeCatalogs implements ProductCatalogPort, TaxRatePort, WarehouseC
   }
 }
 
+export class FakeFiscal implements FiscalPort {
+  down = false;
+  readonly issued: Array<{ billId: string; idempotencyKey: string }> = [];
+  async issueWithholding(params: {
+    organizationId: string;
+    billId: string;
+    idempotencyKey: string;
+    withholdingLines: Array<{ taxCode: string; taxPercentage: string; baseCents: number; taxCents: number }>;
+  }) {
+    if (this.down) throw new FiscalServiceUnavailableError();
+    this.issued.push({ billId: params.billId, idempotencyKey: params.idempotencyKey });
+    return { documentId: `wd-${params.billId}`, authorizationNumber: 'AUTH-WD-1', authorizedAt: '2026-10-20' };
+  }
+}
+
 export function buildPurchasing(store: InMemoryStore, now: () => Date = () => new Date('2026-10-20T15:00:00Z')) {
   const catalogs = new FakeCatalogs();
+  const fiscal = new FakeFiscal();
   const products: ProductCatalogPort = { findById: (org, id) => catalogs.findById(org, id) as Promise<ProductInfo | null> };
   const warehouses: WarehouseCatalogPort = { findById: (org, id) => catalogs.findById(org, id) as never };
   const orderDeps: OrderDeps = { gateway: store, reads: store, clock: now, products, taxRates: catalogs, warehouses };
+  const billDeps = { gateway: store, reads: store, clock: now };
   const uc = {
     getSettings: new GetSettingsUseCase(store, now),
     updateSettings: new UpdateSettingsUseCase(store, now, warehouses),
@@ -221,6 +395,9 @@ export function buildPurchasing(store: InMemoryStore, now: () => Date = () => ne
     setSupplierStatus: new SetSupplierStatusUseCase(store, now),
     listOrders: new ListOrdersUseCase(store),
     getOrder: new GetOrderUseCase(store),
+    getOrderReceiving: new GetOrderReceivingUseCase(store),
+    getReceipt: new GetReceiptUseCase(store),
+    listReceipts: new ListReceiptsUseCase(store),
     createOrder: new CreateOrderUseCase(orderDeps),
     updateOrder: new UpdateOrderUseCase(orderDeps),
     submitOrder: new SubmitOrderUseCase(store, now),
@@ -228,9 +405,19 @@ export function buildPurchasing(store: InMemoryStore, now: () => Date = () => ne
     rejectOrder: new RejectOrderUseCase(store, now),
     reopenOrder: new ReopenOrderUseCase(store, now),
     cancelOrder: new CancelOrderUseCase(store, now),
+    receiveOrder: new ReceiveOrderUseCase(store, now),
+    closeOrder: new CloseOrderUseCase(store, now),
+    listBills: new ListBillsUseCase(store),
+    getBill: new GetBillUseCase(store),
+    createBill: new CreateBillUseCase(billDeps),
+    updateBill: new UpdateBillUseCase(billDeps),
+    postBill: new PostBillUseCase(store, now),
+    overrideBill: new OverrideBillUseCase(store, now),
+    voidBill: new VoidBillUseCase(store, now),
+    issueBillWithholding: new IssueBillWithholdingUseCase(store, fiscal, now),
   };
   const deps: AppDependencies = { useCases: uc, corsOrigin: '*' };
-  return { uc, catalogs, app: createApp(deps) };
+  return { uc, catalogs, fiscal, app: createApp(deps) };
 }
 
 export const supplierInput = (over: Record<string, unknown> = {}) => ({

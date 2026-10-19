@@ -3,15 +3,20 @@ info:
   title: purchasing-service
   version: 1.0.0
   description: >-
-    Compras (plugins `inventory.suppliers` y `purchasing.purchase_orders`): proveedores y órdenes de compra con aprobación.
+    Compras (plugins `inventory.suppliers` y `purchasing.purchase_orders`): proveedores, órdenes de compra con aprobación,
+    recepción de mercadería (entrada a bodega con costo) y factura de compra con conciliación a tres vías (orden / recepción / factura).
     Todas las rutas van detrás del gateway con prefijo `/purchasing` (el gateway NO lo quita) y exigen el módulo contratado de cada
     recurso. Importes SIEMPRE en centavos enteros; cantidades como TEXTO con hasta 6 decimales (`"10.5"`); fechas `AAAA-MM-DD`.
-    Una orden enviada no se edita: se cancela con motivo. Quien prepara una orden no la aprueba.
+    Una orden enviada no se edita: se cancela con motivo. Quien prepara una orden no la aprueba. Una recepción es inmutable.
+    Quien registra una factura no la aprueba con excepción. Errores de negocio: `{ code, message, details? }`; los códigos van
+    en cada respuesta. Mutaciones concurrentes sobre la misma orden o factura se serializan; una versión vieja devuelve 409 `CONCURRENT_UPDATE`.
 servers:
   - url: http://localhost:3017
 tags:
   - name: Proveedores
   - name: Órdenes de compra
+  - name: Recepción de mercadería
+  - name: Facturas de compra
   - name: Política de aprobación
 security:
   - gatewayHeaders: []
@@ -84,7 +89,7 @@ paths:
   /purchasing/orders:
     get:
       tags: [Órdenes de compra]
-      summary: Lista paginada de órdenes (sin líneas: `lineCount`)
+      summary: 'Lista paginada de órdenes (sin líneas: `lineCount`)'
       description: 'Permiso: `purchase:read`. `q` busca en el número y en el nombre del proveedor.'
       parameters:
         - { name: q, in: query, schema: { type: string } }
@@ -181,6 +186,188 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
         '403': { description: Está aprobada y falta `purchase:cancel` }
+  /purchasing/orders/{id}/receipts:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Recepción de mercadería]
+      summary: Registra una recepción de mercadería contra una orden
+      description: >-
+        Permiso: `receipt:create`. Solo contra una orden `approved` o `partially_received`. La entrada a bodega se hace al costo de la
+        línea de la orden. Una recepción es inmutable: un error se corrige con un ajuste de inventario. Numera `RM-AAAA-NNNNNN` y
+        publica `purchase.purchase_order.received` (SOLO con lo recibido en ESTA recepción; lo consume inventory-service),
+        `purchasing.receipt.posted` y, si completa la orden, `purchasing.order.received`. La orden pasa a `partially_received` o `received`.
+        Se rechaza recibir más de lo pedido salvo la tolerancia `overReceiptToleranceBp` de la política.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReceiptInput' } } }
+      responses:
+        '201':
+          description: Recepción registrada. Devuelve la orden actualizada más el id y número de la recepción.
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReceiptResult' } } }
+        '404': { description: 'ORDER_NOT_FOUND: no existe (o es de otra organización)' }
+        '409': { description: 'CONCURRENT_UPDATE: la orden cambió mientras se procesaba; reintentar' }
+        '422':
+          description: >-
+            Validación (`VALIDATION_ERROR`, con el campo) o regla de negocio: `ORDER_NOT_RECEIVABLE` (la orden no está aprobada o ya está
+            recibida/cerrada), `OVER_RECEIPT` (pasa de lo pedido más la tolerancia), `LINE_NOT_IN_ORDER`, `DUPLICATE_RECEIPT_LINE` (la misma línea dos veces).
+        '403': { description: Sin el permiso `receipt:create` }
+  /purchasing/receipts:
+    get:
+      tags: [Recepción de mercadería]
+      summary: Lista paginada de recepciones
+      description: 'Permiso: `purchase:read`.'
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Busca por número de recepción o referencia del proveedor }
+        - { name: purchaseOrderId, in: query, schema: { type: string, format: uuid } }
+        - { name: supplierId, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReceiptPage' } } } }
+  /purchasing/receipts/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Recepción de mercadería]
+      summary: Una recepción con sus líneas
+      description: 'Permiso: `purchase:read`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Receipt' } } } }
+        '404': { description: No existe (o es de otra organización) }
+  /purchasing/orders/{id}/receiving:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Recepción de mercadería]
+      summary: Seguimiento por línea de la orden (pedido / recibido / pendiente / facturado)
+      description: 'Permiso: `purchase:read`. `billed` suma las facturas `posted` y `blocked` contra la línea.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OrderReceiving' } } } }
+        '404': { description: No existe (o es de otra organización) }
+  /purchasing/orders/{id}/close:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Recepción de mercadería]
+      summary: Cierra lo pendiente de una orden
+      description: >-
+        Permiso: `purchase:close`. Da por terminado lo que falta recibir (el proveedor no enviará el resto). Solo desde `approved` o
+        `partially_received` (otro estado es 422 `VALIDATION_ERROR`). El motivo lleva al menos 5 caracteres. Pasa a `closed` y publica
+        `purchasing.order.closed` con el motivo.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Reason' } } }
+      responses:
+        '200': { description: Orden cerrada, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
+        '404': { description: No existe (o es de otra organización) }
+        '409': { description: 'CONCURRENT_UPDATE: la orden cambió mientras se procesaba; reintentar' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '403': { description: Sin el permiso `purchase:close` }
+  /purchasing/bills:
+    get:
+      tags: [Facturas de compra]
+      summary: Lista paginada de facturas de compra
+      description: 'Permiso: `purchase_bill:read`. Las filas no traen líneas (usar el detalle).'
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: Busca por número interno, documento del proveedor o proveedor }
+        - { name: supplierId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/BillStatus' } }
+        - { name: matchStatus, in: query, schema: { $ref: '#/components/schemas/MatchStatus' } }
+        - { name: purchaseOrderId, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BillPage' } } } }
+    post:
+      tags: [Facturas de compra]
+      summary: Registra una factura de compra como borrador
+      description: >-
+        Permiso: `purchase_bill:create`. Registra la factura que el PROVEEDOR nos emitió (no emite nada al SRI). Los totales los calcula el
+        servidor (un redondeo por línea, IVA por línea); si se manda `supplierTotalCents` (el total impreso) se compara con el calculado y una
+        diferencia de más de 1 centavo es `TOTALS_MISMATCH`. Puede ir contra una orden (`purchaseOrderId`) o sin ella. Asigna el número interno
+        `FC-AAAA-NNNNNN` (el año sale de `issueDate`) y publica `purchasing.bill.created`. La conciliación NO corre aquí sino al contabilizar.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BillInput' } } }
+      responses:
+        '201': { description: Borrador creado, content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } } }
+        '409': { description: 'DUPLICATE_SUPPLIER_DOCUMENT: ese documento del proveedor ya está registrado (por establecimiento-punto-secuencial o por autorización)' }
+        '422': { description: 'VALIDATION_ERROR (con el campo; también si el proveedor no existe o está inactivo) o TOTALS_MISMATCH' }
+        '403': { description: Sin el permiso `purchase_bill:create` }
+  /purchasing/bills/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Facturas de compra]
+      summary: Una factura con sus líneas y las razones de la conciliación
+      description: 'Permiso: `purchase_bill:read`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } } }
+        '404': { description: 'BILL_NOT_FOUND: no existe (o es de otra organización)' }
+    put:
+      tags: [Facturas de compra]
+      summary: Edita una factura en borrador o bloqueada
+      description: >-
+        Permiso: `purchase_bill:create`. Solo `draft` o `blocked` (una bloqueada vuelve a `draft` para corregirla). Una `posted` o `voided`
+        es inmutable salvo anularla. Publica `purchasing.bill.updated`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/BillInput' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } } }
+        '404': { description: 'BILL_NOT_FOUND' }
+        '409': { description: 'BILL_NOT_EDITABLE, DUPLICATE_SUPPLIER_DOCUMENT o CONCURRENT_UPDATE' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /purchasing/bills/{id}/post:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Facturas de compra]
+      summary: Contabiliza la factura (corre la conciliación a tres vías)
+      description: >-
+        Permiso: `purchase_bill:create`. Con orden: compara contra lo RECIBIDO y lo ya facturado (acumulado, `posted` y `blocked`) y contra el
+        precio de la orden con las tolerancias de la política. Si todo cuadra queda `posted` (`matchStatus: matched`) y publica `purchasing.bill.posted`
+        (lo consume accounting-service para el asiento). Si no, queda `blocked` con las razones en `matchReasons` y publica `purchasing.bill.blocked`.
+        Sin orden queda `posted` con `matchStatus: not_applicable`. Se serializa por orden: 30 contabilizaciones simultáneas nunca facturan más de lo recibido.
+        La respuesta es 200 aun cuando quede bloqueada: el resultado va en `status`. Si la orden indicada no existe es 422.
+      responses:
+        '200': { description: 'Resultado: `posted` o `blocked`', content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } } }
+        '404': { description: 'BILL_NOT_FOUND' }
+        '409': { description: 'BILL_NOT_POSTABLE (no está en borrador) o CONCURRENT_UPDATE' }
+  /purchasing/bills/{id}/override:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Facturas de compra]
+      summary: Aprueba con excepción una factura bloqueada
+      description: >-
+        Permiso: `purchase_bill:override` (distinto del de crear). La debe aprobar OTRA persona distinta de quien la registró
+        (`SELF_OVERRIDE_NOT_ALLOWED`, 403) y con motivo. Pasa a `posted` con `matchStatus: overridden`; la diferencia de precio queda en
+        cada línea (`priceVarianceCents`) y accounting la lleva al rol `purchase_price_variance`. Publica `purchasing.bill.overridden` y
+        `purchasing.bill.posted`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Reason' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } } }
+        '403': { description: 'Sin permiso o SELF_OVERRIDE_NOT_ALLOWED' }
+        '404': { description: 'BILL_NOT_FOUND' }
+        '409': { description: 'BILL_NOT_OVERRIDABLE: no está bloqueada' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /purchasing/bills/{id}/void:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Facturas de compra]
+      summary: Anula una factura contabilizada
+      description: >-
+        Permiso: `purchase_bill:void`. Solo desde `posted` o `blocked`, con motivo de al menos 5 caracteres. Libera lo facturado de la
+        orden y publica `purchasing.bill.voided`, que accounting-service usa para reversar el asiento.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Reason' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } } }
+        '404': { description: 'BILL_NOT_FOUND' }
+        '409': { description: 'BILL_NOT_VOIDABLE' }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /purchasing/settings:
     get:
       tags: [Política de aprobación]
@@ -191,7 +378,10 @@ paths:
     put:
       tags: [Política de aprobación]
       summary: Cambia la política
-      description: 'Permiso: `purchase:approve`. `approvalThresholdCents`: `null` = nunca; `0` = siempre; `N` = desde N centavos.'
+      description: >-
+        Permiso: `purchase:approve`. `approvalThresholdCents`: `null` = nunca; `0` = siempre; `N` = desde N centavos. Las tolerancias van
+        en puntos básicos (100 = 1 %) y por defecto son 0 (estricto): `overReceiptToleranceBp` (recibir más de lo pedido),
+        `priceToleranceBp` (precio de la factura contra el de la orden) y `qtyToleranceBp` (cantidad facturada contra la recibida).
       requestBody:
         required: true
         content:
@@ -201,6 +391,9 @@ paths:
               properties:
                 approvalThresholdCents: { type: integer, minimum: 0, nullable: true }
                 defaultWarehouseId: { type: string, format: uuid, nullable: true }
+                overReceiptToleranceBp: { type: integer, minimum: 0, maximum: 5000 }
+                priceToleranceBp: { type: integer, minimum: 0, maximum: 5000 }
+                qtyToleranceBp: { type: integer, minimum: 0, maximum: 5000 }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } }
 components:
@@ -339,6 +532,189 @@ components:
         rejectionReason: { type: string, nullable: true }
         cancelReason: { type: string, nullable: true }
         version: { type: integer }
+    ReceiptInput:
+      type: object
+      required: [receiptDate, lines]
+      additionalProperties: false
+      properties:
+        receiptDate: { type: string, format: date, description: 'AAAA-MM-DD' }
+        supplierDeliveryRef: { type: string, maxLength: 60, nullable: true, description: Guía o remito del proveedor }
+        notes: { type: string, maxLength: 1000, nullable: true }
+        lines:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [orderLineId, quantity]
+            additionalProperties: false
+            properties:
+              orderLineId: { type: string, format: uuid }
+              quantity: { type: string, example: '10.5', description: 'Positiva, hasta 6 decimales' }
+    ReceiptLine:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        orderLineId: { type: string, format: uuid }
+        productId: { type: string, format: uuid, nullable: true }
+        quantity: { type: string, example: '10.5' }
+        unitCostCents: { type: integer, description: Costo de la línea de la orden }
+        currencyCode: { type: string, example: USD }
+    Receipt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string, example: RM-2026-000042 }
+        purchaseOrderId: { type: string, format: uuid }
+        supplierId: { type: string, format: uuid }
+        warehouseId: { type: string, format: uuid }
+        receiptDate: { type: string, format: date }
+        supplierDeliveryRef: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        lineCount: { type: integer }
+        lines: { type: array, items: { $ref: '#/components/schemas/ReceiptLine' } }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+    ReceiptPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Receipt' } }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+    ReceiptResult:
+      description: La orden actualizada (con su nuevo estado) más el id y número de la recepción recién creada.
+      allOf:
+        - $ref: '#/components/schemas/Order'
+        - type: object
+          properties:
+            receiptId: { type: string, format: uuid }
+            receiptNumber: { type: string, example: RM-2026-000042 }
+    OrderReceiving:
+      type: object
+      properties:
+        orderId: { type: string, format: uuid }
+        orderNumber: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/OrderStatus' }
+        lines:
+          type: array
+          items:
+            type: object
+            properties:
+              lineId: { type: string, format: uuid }
+              ordered: { type: string, example: '100' }
+              received: { type: string, example: '40' }
+              pending: { type: string, example: '60' }
+              billed: { type: string, example: '40' }
+    BillStatus:
+      type: string
+      enum: [draft, posted, blocked, voided]
+    MatchStatus:
+      type: string
+      description: Resultado de la conciliación a tres vías
+      enum: [matched, blocked, overridden, not_applicable]
+    MatchReason:
+      type: object
+      properties:
+        code: { type: string, enum: [QTY_EXCEEDS_RECEIVED, PRICE_VARIANCE, NO_RECEIPT, LINE_NOT_IN_ORDER] }
+        lineId: { type: string, format: uuid }
+        detail: { type: string }
+    BillLineInput:
+      type: object
+      required: [description, quantity, unitCostCents, taxRatePct]
+      additionalProperties: false
+      properties:
+        orderLineId: { type: string, format: uuid, nullable: true, description: Línea de la orden que se factura (conciliación) }
+        productId: { type: string, format: uuid, nullable: true, description: 'Sin producto = línea de gasto' }
+        description: { type: string, maxLength: 300 }
+        quantity: { type: string, example: '10', description: 'Positiva, hasta 6 decimales' }
+        unitCostCents: { type: integer, minimum: 0 }
+        discountCents: { type: integer, minimum: 0 }
+        taxCode: { type: string, maxLength: 12, nullable: true, example: '2' }
+        taxPercentageCode: { type: string, maxLength: 12, nullable: true, example: '4' }
+        taxRatePct: { type: string, example: '15.00', description: 'Hasta 2 decimales' }
+        taxCents: { type: integer, minimum: 0, description: Si no se manda, lo calcula el servidor }
+        iceCents: { type: integer, minimum: 0 }
+        irbpnrCents: { type: integer, minimum: 0 }
+        expenseAccountHint: { type: string, maxLength: 60, nullable: true, description: Código de cuenta sugerido para una línea de gasto }
+    BillInput:
+      type: object
+      required: [supplierId, docType, establishment, emissionPoint, sequential, issueDate, dueDate, currencyCode, lines]
+      additionalProperties: false
+      properties:
+        supplierId: { type: string, format: uuid }
+        purchaseOrderId: { type: string, format: uuid, nullable: true }
+        docType: { type: string, enum: ['01', '03', '41'], description: '01 factura, 03 liquidación de compra, 41 comprobante con reembolso' }
+        establishment: { type: string, pattern: '^\\d{3}$' }
+        emissionPoint: { type: string, pattern: '^\\d{3}$' }
+        sequential: { type: string, pattern: '^\\d{9}$' }
+        authorizationNumber: { type: string, maxLength: 49, nullable: true, description: Clave de acceso o autorización del proveedor }
+        issueDate: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        currencyCode: { type: string, example: USD }
+        notes: { type: string, maxLength: 1000, nullable: true }
+        supplierTotalCents: { type: integer, description: 'Total impreso en la factura; se compara con el calculado' }
+        lines: { type: array, minItems: 1, items: { $ref: '#/components/schemas/BillLineInput' } }
+    BillLine:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        lineNumber: { type: integer }
+        orderLineId: { type: string, format: uuid, nullable: true }
+        productId: { type: string, format: uuid, nullable: true }
+        description: { type: string }
+        quantity: { type: string }
+        unitCostCents: { type: integer }
+        discountCents: { type: integer }
+        subtotalCents: { type: integer }
+        taxCode: { type: string, nullable: true }
+        taxPercentageCode: { type: string, nullable: true }
+        taxRatePct: { type: string }
+        taxCents: { type: integer }
+        iceCents: { type: integer }
+        irbpnrCents: { type: integer }
+        totalCents: { type: integer }
+        expenseAccountHint: { type: string, nullable: true }
+        priceVarianceCents: { type: integer, description: 'Diferencia de la línea contra el costo de la orden (centavos del total de la línea); 0 si no hubo' }
+    Bill:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        internalNumber: { type: string, example: FC-2026-000042, description: Se asigna al registrar la factura }
+        supplierId: { type: string, format: uuid }
+        supplier: { type: object, properties: { identificationType: { type: string }, identification: { type: string }, legalName: { type: string } } }
+        purchaseOrderId: { type: string, format: uuid, nullable: true }
+        docType: { type: string, enum: ['01', '03', '41'] }
+        establishment: { type: string }
+        emissionPoint: { type: string }
+        sequential: { type: string }
+        authorizationNumber: { type: string, nullable: true }
+        issueDate: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        currencyCode: { type: string }
+        subtotalCents: { type: integer }
+        taxCents: { type: integer }
+        totalCents: { type: integer }
+        supplierTotalCents: { type: integer, nullable: true }
+        status: { $ref: '#/components/schemas/BillStatus' }
+        matchStatus: { $ref: '#/components/schemas/MatchStatus' }
+        matchReasons: { type: array, items: { $ref: '#/components/schemas/MatchReason' } }
+        overrideReason: { type: string, nullable: true }
+        overrideBy: { type: string, format: uuid, nullable: true }
+        withholdingStatus: { type: string, enum: [none, issued] }
+        voidReason: { type: string, nullable: true }
+        lineCount: { type: integer }
+        lines: { type: array, items: { $ref: '#/components/schemas/BillLine' }, description: Solo en el detalle }
+        createdBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version: { type: integer }
+    BillPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Bill' } }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
     OrderPage:
       type: object
       properties:
@@ -351,4 +727,7 @@ components:
       properties:
         approvalThresholdCents: { type: integer, nullable: true }
         defaultWarehouseId: { type: string, format: uuid, nullable: true }
+        overReceiptToleranceBp: { type: integer, description: 'Puntos básicos; 0 = no se recibe más de lo pedido' }
+        priceToleranceBp: { type: integer, description: 'Puntos básicos; 0 = el precio de la factura debe ser el de la orden' }
+        qtyToleranceBp: { type: integer, description: 'Puntos básicos; 0 = no se factura más de lo recibido' }
         updatedAt: { type: string, format: date-time }

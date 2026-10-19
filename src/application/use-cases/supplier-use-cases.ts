@@ -5,8 +5,12 @@ import { supplierUpsertedEvent } from '../events.js';
 import type { Clock, UnitOfWorkGateway } from '../ports.js';
 
 /** Corre `work` dentro de una transacción: confirma si termina, deshace si lanza. */
-export async function inTransaction<T>(gateway: UnitOfWorkGateway, work: (uow: UnitOfWork) => Promise<T>): Promise<T> {
-  const uow = await gateway.begin();
+export async function inTransaction<T>(
+  gateway: UnitOfWorkGateway,
+  work: (uow: UnitOfWork) => Promise<T>,
+  options?: { readCommitted?: boolean },
+): Promise<T> {
+  const uow = await gateway.begin(options);
   try {
     const result = await work(uow);
     await uow.commit();

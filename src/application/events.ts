@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { PurchaseOrder } from '../domain/purchase-order.js';
+import type { PurchaseBill } from '../domain/purchase-bill.js';
 import { quantityToString } from '../domain/money.js';
 import type { DomainEvent, PurchasingSettings } from '../domain/repositories.js';
 import type { Supplier } from '../domain/supplier.js';
@@ -104,6 +105,175 @@ export function settingsUpdatedEvent(s: PurchasingSettings): DomainEvent {
     aggregateType: 'purchasing_settings',
     aggregateId: s.organizationId,
     organizationId: s.organizationId,
-    payload: { approvalThresholdCents: s.approvalThresholdCents, defaultWarehouseId: s.defaultWarehouseId },
+    payload: { approvalThresholdCents: s.approvalThresholdCents, defaultWarehouseId: s.defaultWarehouseId, overReceiptToleranceBp: s.overReceiptToleranceBp },
   });
+}
+
+/** Recepción de mercadería registrada (contrato con inventory-service).
+ *  C.5: payload exacto que espera inventory. Lleva SOLO lo recibido en ESTA recepción: inventory suma cada línea tal cual
+ *  llega, así que mandar la orden entera (o lo pedido) duplicaría el stock en cada entrega parcial. */
+export function purchaseOrderReceivedEvent(params: {
+  order: PurchaseOrder;
+  receiptId: string;
+  receiptNumber: string;
+  warehouseId: string;
+  lines: { productId: string; quantityMicros: bigint; unitCostCents: number }[];
+}): DomainEvent {
+  const { order, receiptId, receiptNumber, warehouseId, lines } = params;
+  return domainEvent({
+    type: 'purchase.purchase_order.received',
+    aggregateType: 'purchase_order',
+    aggregateId: order.id,
+    organizationId: order.organizationId,
+    payload: {
+      purchaseOrderId: order.id,
+      organizationId: order.organizationId,
+      warehouseId,
+      receiptId,
+      receiptNumber,
+      lines: lines.map((l) => ({
+        productId: l.productId,
+        quantity: quantityToString(l.quantityMicros),
+        unitCostCents: l.unitCostCents,
+        currencyCode: order.currencyCode,
+      })),
+    },
+  });
+}
+
+/** Recepción registrada: evento propio de purchasing para auditoría y terceros (C.5). */
+export function receiptPostedEvent(params: {
+  receiptId: string;
+  receiptNumber: string;
+  orderId: string;
+  orderNumber: string | null;
+  supplierId: string;
+  warehouseId: string;
+  lineCount: number;
+  totalCostCents: number;
+  organizationId: string;
+}): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.receipt.posted',
+    aggregateType: 'goods_receipt',
+    aggregateId: params.receiptId,
+    organizationId: params.organizationId,
+    payload: {
+      receiptId: params.receiptId,
+      receiptNumber: params.receiptNumber,
+      orderId: params.orderId,
+      orderNumber: params.orderNumber,
+      supplierId: params.supplierId,
+      warehouseId: params.warehouseId,
+      lineCount: params.lineCount,
+      totalCostCents: params.totalCostCents,
+    },
+  });
+}
+
+/** Orden pasó a 'received' (todas las líneas de producto completadas). C.5. */
+export function orderReceivedEvent(o: PurchaseOrder): DomainEvent {
+  return orderEvent('purchasing.order.received', o);
+}
+
+/** Orden cerrada manualmente (lo pendiente se da por terminado). C.5. */
+export function orderClosedEvent(o: PurchaseOrder, reason: string): DomainEvent {
+  return orderEvent('purchasing.order.closed', o, { reason });
+}
+
+/** Factura de compra creada (borrador). D.5. */
+export function billCreatedEvent(b: PurchaseBill): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.created',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: billPayload(b),
+  });
+}
+
+/** Factura de compra actualizada (borrador). D.5. */
+export function billUpdatedEvent(b: PurchaseBill): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.updated',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: billPayload(b),
+  });
+}
+
+/** Factura de compra contabilizada (posted o blocked). D.5: evento de negocio que consume accounting. */
+export function billPostedEvent(b: PurchaseBill): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.posted',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: billPayload(b),
+  });
+}
+
+/** Factura bloqueada por conciliación. D.5. */
+export function billBlockedEvent(b: PurchaseBill): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.blocked',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: { ...billPayload(b), matchReasons: b.matchReasons },
+  });
+}
+
+/** Factura aprobada con excepción (override). D.5. */
+export function billOverriddenEvent(b: PurchaseBill): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.overridden',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: { ...billPayload(b), overrideReason: b.overrideReason, overrideBy: b.overrideBy },
+  });
+}
+
+/** Factura anulada. D.5. */
+export function billVoidedEvent(b: PurchaseBill): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.voided',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: { ...billPayload(b), voidReason: b.voidReason },
+  });
+}
+
+/** Payload común para eventos de factura (D.5). */
+function billPayload(b: PurchaseBill): Record<string, unknown> {
+  return {
+    billId: b.id,
+    internalNumber: b.internalNumber,
+    supplierId: b.supplierId,
+    supplier: { identification: b.supplier.identification, legalName: b.supplier.legalName },
+    docType: b.docType,
+    supplierDocument: `${b.establishment}-${b.emissionPoint}-${b.sequential}`,
+    issueDate: b.issueDate,
+    dueDate: b.dueDate,
+    currencyCode: b.currencyCode,
+    subtotalCents: b.subtotalCents,
+    taxCents: b.taxCents,
+    totalCents: b.totalCents,
+    establishmentId: null, // se puede añadir si se trae del proveedor
+    orderId: b.purchaseOrderId,
+    matchStatus: b.matchStatus,
+    lines: b.lines.map((l) => ({
+      kind: l.productId ? 'stock' : 'expense',
+      productId: l.productId,
+      expenseAccountHint: l.expenseAccountHint,
+      subtotalCents: l.subtotalCents,
+      vatCents: l.taxCents,
+      iceCents: l.iceCents,
+      irbpnrCents: l.irbpnrCents,
+      priceVarianceCents: l.priceVarianceCents,
+    })),
+  };
 }

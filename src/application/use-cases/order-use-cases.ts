@@ -6,7 +6,7 @@ import {
   ValidationError,
   type ErrorDetail,
 } from '../../domain/errors.js';
-import { parseQuantity } from '../../domain/money.js';
+import { parseQuantity, quantityToString } from '../../domain/money.js';
 import {
   approve,
   cancel,
@@ -274,5 +274,49 @@ export class ListOrdersUseCase {
 
   execute(params: { organizationId: string; filters: OrderFilters }): Promise<Page<PurchaseOrder>> {
     return this.repos.orders.list(params.organizationId, params.filters);
+  }
+}
+
+export class GetOrderReceivingUseCase {
+  constructor(private readonly repos: UnitOfWork) {}
+
+  async execute(params: { organizationId: string; orderId: string }) {
+    const order = await this.repos.orders.findById(params.organizationId, params.orderId);
+    if (!order) throw new (await import('../../domain/errors.js')).OrderNotFoundError();
+    const { computeLineReceiving } = await import('../../domain/purchase-order.js');
+    // Lo ya facturado contra la orden (posted/blocked), para que el seguimiento muestre el saldo real
+    // por facturar y no un 0 que ocultaría la doble facturación.
+    const billedByLine = await this.repos.bills.billedByOrderLine(params.organizationId, order.id);
+    return {
+      orderId: order.id,
+      orderNumber: order.number,
+      status: order.status,
+      // Los bigint no se pueden serializar a JSON: se entregan como texto (misma regla que el resto de cantidades).
+      lines: computeLineReceiving(order, billedByLine).map((l) => ({
+        lineId: l.lineId,
+        ordered: quantityToString(l.ordered),
+        received: quantityToString(l.received),
+        pending: quantityToString(l.pending),
+        billed: quantityToString(l.billed),
+      })),
+    };
+  }
+}
+
+export class GetReceiptUseCase {
+  constructor(private readonly repos: UnitOfWork) {}
+
+  async execute(params: { organizationId: string; receiptId: string }) {
+    const receipt = await this.repos.receipts.findById(params.organizationId, params.receiptId);
+    if (!receipt) throw new (await import('../../domain/errors.js')).OrderNotFoundError();
+    return receipt;
+  }
+}
+
+export class ListReceiptsUseCase {
+  constructor(private readonly repos: UnitOfWork) {}
+
+  execute(params: { organizationId: string; filters: import('../../domain/repositories.js').ReceiptFilters }) {
+    return this.repos.receipts.list(params.organizationId, params.filters);
   }
 }

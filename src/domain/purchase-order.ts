@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
   ApprovalRequiredError,
+  DuplicateReceiptLineError,
   InvalidOrderStateError,
+  LineNotInOrderError,
+  OverReceiptError,
   SelfApprovalError,
   ValidationError,
   type ErrorDetail,
@@ -292,4 +295,94 @@ export function assertApproved(order: PurchaseOrder): void {
 /** `OC-2026-000042`. */
 export function formatOrderNumber(year: number, sequence: number): string {
   return `OC-${year}-${String(sequence).padStart(6, '0')}`;
+}
+
+/** Estados que permiten recibir mercadería (C.2.2). */
+export const RECEIVABLE_STATUSES: readonly OrderStatus[] = ['approved', 'partially_received'] as const;
+
+/** Verifica que la orden pueda recibir mercadería. */
+export function assertReceivable(order: PurchaseOrder): void {
+  if (!RECEIVABLE_STATUSES.includes(order.status)) throw new InvalidOrderStateError('La orden no está en estado que permita recibir mercadería (solo approved o partially_received).');
+}
+
+/** `RM-2026-000042`. */
+export function formatReceiptNumber(year: number, sequence: number): string {
+  return `RM-${year}-${String(sequence).padStart(6, '0')}`;
+}
+
+/** Calcula el estado resultante tras aplicar una recepción.
+ *  - `partially_received` si queda pendiente en alguna línea de producto.
+ *  - `received` si todas las líneas de producto tienen recibido >= pedido.
+ *  (Las líneas de servicio/sin stock también cuentan para cerrar la orden, C.2.6). */
+export function computeOrderStatusAfterReceipt(order: PurchaseOrder): OrderStatus {
+  const allProductLinesReceived = order.lines
+    .filter(l => l.productId) // líneas de producto (las que pueden llevar stock)
+    .every(l => l.receivedMicros >= l.quantityMicros);
+  return allProductLinesReceived ? 'received' : 'partially_received';
+}
+
+/** Aplica una recepción a la orden: incrementa receivedMicros por línea y devuelve la orden actualizada.
+ *  Valida: líneas pertenecen a la orden, cantidad > 0, no duplicar misma línea en la recepción,
+ *  tolerancia de sobre-recepción por línea (bp), y orden en estado recepcionable. */
+export function applyReceipt(params: {
+  order: PurchaseOrder;
+  receiptLines: { orderLineId: string; quantityMicros: bigint }[];
+  toleranceBp: number;
+  now: Date;
+}): PurchaseOrder {
+  const { order, receiptLines, toleranceBp, now } = params;
+  assertReceivable(order);
+
+  // Validar: no duplicar orderLineId en la misma recepción
+  const seen = new Set<string>();
+  for (const rl of receiptLines) {
+    if (seen.has(rl.orderLineId)) throw new DuplicateReceiptLineError();
+    seen.add(rl.orderLineId);
+  }
+
+  // Validar cada línea: pertenece a la orden, cantidad > 0, tolerancia
+  const lineById = new Map(order.lines.map(l => [l.id, l]));
+  for (const rl of receiptLines) {
+    const line = lineById.get(rl.orderLineId);
+    if (!line) throw new LineNotInOrderError();
+    if (rl.quantityMicros <= 0n) throw new ValidationError([{ field: 'quantity', message: 'La cantidad a recibir debe ser > 0.' }]);
+
+    // Tolerancia de sobre-recepción (C.2.4): recibido_acumulado + esta_recepción ≤ pedido * (1 + tolerancia)
+    const ordered = line.quantityMicros;
+    const already = line.receivedMicros;
+    const newTotal = already + rl.quantityMicros;
+    const maxAllowed = ordered + (ordered * BigInt(toleranceBp) / 10000n);
+    if (newTotal > maxAllowed) {
+      // Buscar nombre del producto para el error (si está en la línea)
+      const productName = line.description || line.sku || 'línea';
+      throw new OverReceiptError(productName, newTotal.toString(), ordered.toString(), toleranceBp);
+    }
+  }
+
+  // Aplicar: mutar receivedMicros
+  const updatedLines = order.lines.map(l => {
+    const rl = receiptLines.find(r => r.orderLineId === l.id);
+    if (rl) return { ...l, receivedMicros: l.receivedMicros + rl.quantityMicros };
+    return l;
+  });
+
+  const newStatus = computeOrderStatusAfterReceipt({ ...order, lines: updatedLines });
+  return { ...order, lines: updatedLines, status: newStatus, updatedAt: now, version: order.version + 1 };
+}
+
+/** Calcula recibido por línea para vista de seguimiento. */
+export function computeLineReceiving(order: PurchaseOrder, billedByLine?: Map<string, bigint>): Array<{
+  lineId: string;
+  ordered: bigint;
+  received: bigint;
+  pending: bigint;
+  billed: bigint;
+}> {
+  return order.lines.map(l => ({
+    lineId: l.id,
+    ordered: l.quantityMicros,
+    received: l.receivedMicros,
+    pending: l.quantityMicros - l.receivedMicros,
+    billed: billedByLine?.get(l.id) ?? 0n,
+  }));
 }

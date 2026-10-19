@@ -1,4 +1,6 @@
 import { quantityToString } from '../../domain/money.js';
+import type { GoodsReceipt, GoodsReceiptLine } from '../../domain/repositories.js';
+import type { BillLine, PurchaseBill } from '../../domain/purchase-bill.js';
 import type { OrderLine, PurchaseOrder } from '../../domain/purchase-order.js';
 import type { PurchasingSettings } from '../../domain/repositories.js';
 import type { Supplier } from '../../domain/supplier.js';
@@ -77,5 +79,86 @@ export const toOrderJSON = (o: PurchaseOrder, options: { withLines?: boolean } =
 export const toSettingsJSON = (s: PurchasingSettings) => ({
   approvalThresholdCents: s.approvalThresholdCents,
   defaultWarehouseId: s.defaultWarehouseId,
+  overReceiptToleranceBp: s.overReceiptToleranceBp,
+  priceToleranceBp: s.priceToleranceBp,
+  qtyToleranceBp: s.qtyToleranceBp,
   updatedAt: s.updatedAt.toISOString(),
+});
+
+const toReceiptLineJSON = (l: GoodsReceiptLine) => ({
+  id: l.id,
+  orderLineId: l.orderLineId,
+  productId: l.productId,
+  quantity: quantityToString(l.quantityMicros),
+  unitCostCents: l.unitCostCents,
+  currencyCode: l.currencyCode,
+});
+
+export const toReceiptJSON = (r: GoodsReceipt & { lines?: GoodsReceiptLine[] }) => ({
+  id: r.id,
+  number: r.number,
+  purchaseOrderId: r.purchaseOrderId,
+  supplierId: r.supplierId,
+  warehouseId: r.warehouseId,
+  receiptDate: r.receiptDate,
+  supplierDeliveryRef: r.supplierDeliveryRef,
+  notes: r.notes,
+  lineCount: r.lines?.length ?? 0,
+  lines: r.lines?.map(toReceiptLineJSON) ?? [],
+  createdBy: r.createdBy,
+  createdAt: r.createdAt.toISOString(),
+});
+
+const toBillLineJSON = (l: BillLine) => ({
+  id: l.id,
+  lineNumber: l.lineNumber,
+  orderLineId: l.orderLineId,
+  productId: l.productId,
+  description: l.description,
+  quantity: quantityToString(l.quantityMicros),
+  unitCostCents: l.unitCostCents,
+  discountCents: l.discountCents,
+  subtotalCents: l.subtotalCents,
+  taxCode: l.taxCode,
+  taxPercentageCode: l.taxPercentageCode,
+  taxRatePct: l.taxRatePct,
+  taxCents: l.taxCents,
+  iceCents: l.iceCents,
+  irbpnrCents: l.irbpnrCents,
+  totalCents: l.totalCents,
+  expenseAccountHint: l.expenseAccountHint,
+  priceVarianceCents: l.priceVarianceCents,
+});
+
+export const toBillJSON = (b: PurchaseBill, options: { withLines?: boolean } = {}) => ({
+  id: b.id,
+  internalNumber: b.internalNumber,
+  supplierId: b.supplierId,
+  supplier: b.supplier,
+  purchaseOrderId: b.purchaseOrderId,
+  docType: b.docType,
+  establishment: b.establishment,
+  emissionPoint: b.emissionPoint,
+  sequential: b.sequential,
+  authorizationNumber: b.authorizationNumber,
+  issueDate: b.issueDate,
+  dueDate: b.dueDate,
+  currencyCode: b.currencyCode,
+  subtotalCents: b.subtotalCents,
+  taxCents: b.taxCents,
+  totalCents: b.totalCents,
+  supplierTotalCents: b.supplierTotalCents,
+  status: b.status,
+  matchStatus: b.matchStatus,
+  matchReasons: b.matchReasons,
+  overrideReason: b.overrideReason,
+  overrideBy: b.overrideBy,
+  withholdingStatus: b.withholdingStatus,
+  voidReason: b.voidReason,
+  lineCount: b.lines.length,
+  ...(options.withLines === false ? {} : { lines: b.lines.map(toBillLineJSON) }),
+  createdBy: b.createdBy,
+  createdAt: b.createdAt.toISOString(),
+  updatedAt: b.updatedAt.toISOString(),
+  version: b.version,
 });
