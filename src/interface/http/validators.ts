@@ -186,21 +186,6 @@ export const overrideSchema = z.object({ reason: z.string().trim().min(5, 'El mo
 
 export const voidSchema = z.object({ reason: z.string().trim().min(5, 'El motivo debe tener al menos 5 caracteres.').max(300) }).strict();
 
-const withholdingLineSchema = z
-  .object({
-    taxCode: z.string().min(1).max(12),
-    taxPercentage: z.string().regex(/^\d+(\.\d{1,2})?$/, 'Porcentaje con hasta 2 decimales.'),
-    baseCents: CENTS,
-    taxCents: CENTS,
-  })
-  .strict();
-
-export const withholdingSchema = z
-  .object({
-    withholdingLines: z.array(withholdingLineSchema).min(1, 'La retención necesita al menos una línea.'),
-  })
-  .strict();
-
 /** Valida el cuerpo y responde con el formato de error del servicio (`VALIDATION_ERROR` + campos), no con el de zod. */
 export function validateJson<T extends ZodSchema>(schema: T) {
   return zValidator('json', schema, (result) => {

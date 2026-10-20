@@ -23,6 +23,8 @@ export interface ProductInfo {
   name: string;
   sku: string | null;
   status: string;
+  /** Si el producto lleva control de stock. Decide a dónde va su compra: inventario (sí) o gasto (no: un servicio, un suministro). */
+  tracksStock: boolean;
   /** Tarifas de impuesto que el producto trae asignadas (la de IVA se propone al armar la línea). */
   taxes: { taxRateId: string; kind: string }[];
 }
@@ -55,20 +57,3 @@ export interface WarehouseCatalogPort {
   findById(organizationId: string, warehouseId: string): Promise<WarehouseInfo | null>;
 }
 
-/** Puerto para llamar a fiscal-ecuador (retenciones, liquidaciones, etc.). */
-export interface FiscalPort {
-  /** Emite una retención (codDoc 07) sobre una factura de compra.
-   *  Devuelve el documentId de la retención emitida. */
-  issueWithholding(params: {
-    organizationId: string;
-    billId: string;
-    idempotencyKey: string;
-    // Datos para prellenar (el usuario elige códigos/porcentajes en UI)
-    withholdingLines: Array<{
-      taxCode: string;           // código de retención (ej. 01, 02, 03...)
-      taxPercentage: string;     // porcentaje (ej. "1.00", "2.00", "10.00")
-      baseCents: number;
-      taxCents: number;
-    }>;
-  }): Promise<{ documentId: string; authorizationNumber: string; authorizedAt: string }>;
-}

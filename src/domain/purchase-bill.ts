@@ -33,11 +33,16 @@ export type MatchStatus =
 export const SUPPLIER_DOC_TYPES = ['01', '03', '41'] as const;
 export type SupplierDocType = (typeof SUPPLIER_DOC_TYPES)[number];
 
+/** A dónde va la compra de la línea: inventario (mercadería que lleva stock) o gasto (servicios y suministros). */
+export type BillLineKind = 'stock' | 'expense';
+
 export interface BillLine {
   id: string;
   lineNumber: number;
   orderLineId: string | null;
   productId: string | null;
+  /** Lo decide el servidor al guardar (catálogo de producto); contabilidad asienta a inventario solo las `stock`. */
+  kind: BillLineKind;
   description: string;
   quantityMicros: bigint;
   unitCostCents: number;
@@ -69,6 +74,11 @@ export interface BillLineInput {
   iceCents: number;
   irbpnrCents: number;
   expenseAccountHint?: string | null;
+  /**
+   * Si el producto de la línea lleva stock. Lo pone el caso de uso desde el catálogo, nunca el cliente. Sin dato (pruebas de dominio)
+   * una línea con producto se trata como mercadería.
+   */
+  tracksStock?: boolean;
 }
 
 export interface SupplierSnapshot {
@@ -92,6 +102,7 @@ export interface PurchaseBill {
   issueDate: string;
   dueDate: string;
   currencyCode: string;
+  notes: string | null;
   subtotalCents: number;
   taxCents: number;
   totalCents: number;
@@ -175,6 +186,7 @@ export function computeBillLine(input: BillLineInput, lineNumber: number, id: st
     lineNumber,
     orderLineId: input.orderLineId ?? null,
     productId: input.productId ?? null,
+    kind: input.productId && input.tracksStock !== false ? 'stock' : 'expense',
     description: input.description.trim(),
     quantityMicros: input.quantityMicros,
     unitCostCents: input.unitCostCents,
@@ -224,6 +236,7 @@ export function newBillDraft(params: {
     issueDate: params.header.issueDate,
     dueDate: params.header.dueDate,
     currencyCode: params.header.currencyCode,
+    notes: params.header.notes,
     subtotalCents: totals.subtotalCents,
     taxCents: totals.taxCents,
     totalCents: totals.totalCents,
@@ -261,6 +274,7 @@ export function replaceBillDraft(bill: PurchaseBill, header: BillHeaderInput, li
     issueDate: header.issueDate,
     dueDate: header.dueDate,
     currencyCode: header.currencyCode,
+    notes: header.notes,
     lines: built,
     subtotalCents: totals.subtotalCents,
     taxCents: totals.taxCents,

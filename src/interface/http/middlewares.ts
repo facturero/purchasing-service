@@ -73,6 +73,20 @@ export function requirePermission(perm: string): MiddlewareHandler<{
   };
 }
 
+/**
+ * La factura de compra **sin orden** no tiene conciliación a tres vías que la respalde, así que `purchase_bill:create`
+ * (Administrador y Supervisor) no basta: exige `purchase_bill:create_unmatched` (solo Administrador). Se comprueba en
+ * la ruta, que es donde vive el cuerpo ya validado; antes no se comprobaba en ningún sitio y el permiso concedido en
+ * `auth-service` quedaba de adorno: cualquiera con `purchase_bill:create` podía crear facturas sin orden.
+ */
+export function assertCanBillWithoutOrder(
+  purchaseOrderId: string | null | undefined,
+  permissions: readonly string[],
+): void {
+  if (purchaseOrderId) return;
+  if (!permissions.includes('purchase_bill:create_unmatched')) throw new ForbiddenError();
+}
+
 /** Un UNIQUE de MySQL que no se anticipó en el caso de uso (p. ej. dos nombres
  *  que difieren solo en acentos y que la colación considera iguales) no debe
  *  salir como 500: se mapea a 409. */

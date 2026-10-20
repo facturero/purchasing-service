@@ -247,6 +247,28 @@ export function billVoidedEvent(b: PurchaseBill): DomainEvent {
   });
 }
 
+/**
+ * Una retención emitida sobre esta factura quedó AUTORIZADA (la trae fiscal.ec.withholding.issued). El id y el número del
+ * comprobante viajan aquí porque la factura no los guarda: es el rastro de auditoría de qué retención le corresponde.
+ */
+export function billWithholdingIssuedEvent(
+  b: PurchaseBill,
+  withholding: { withholdingId: string; number: string | null; authorizationNumber: string | null },
+): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.bill.withholding_issued',
+    aggregateType: 'purchase_bill',
+    aggregateId: b.id,
+    organizationId: b.organizationId,
+    payload: {
+      ...billPayload(b),
+      withholdingDocumentId: withholding.withholdingId,
+      withholdingNumber: withholding.number,
+      withholdingAuthorization: withholding.authorizationNumber,
+    },
+  });
+}
+
 /** Payload común para eventos de factura (D.5). */
 function billPayload(b: PurchaseBill): Record<string, unknown> {
   return {
@@ -266,7 +288,7 @@ function billPayload(b: PurchaseBill): Record<string, unknown> {
     orderId: b.purchaseOrderId,
     matchStatus: b.matchStatus,
     lines: b.lines.map((l) => ({
-      kind: l.productId ? 'stock' : 'expense',
+      kind: l.kind,
       productId: l.productId,
       expenseAccountHint: l.expenseAccountHint,
       subtotalCents: l.subtotalCents,

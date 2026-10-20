@@ -7,7 +7,6 @@ import './infrastructure/persistence/models.js';
 import { readOnlyRepositories, SequelizeUnitOfWorkFactory } from './infrastructure/persistence/repositories.js';
 import { HttpProductCatalog, HttpTaxRateCatalog, HttpWarehouseCatalog } from './infrastructure/catalogs/http-catalogs.js';
 import { buildEventHandlers, startEventConsumers } from './infrastructure/messaging/consumer.js';
-import { HttpFiscalPort } from './infrastructure/catalogs/http-fiscal.js';
 import {
   CreateSupplierUseCase,
   GetSupplierUseCase,
@@ -40,7 +39,6 @@ import {
   UpdateBillUseCase,
   VoidBillUseCase,
 } from './application/use-cases/bill-use-cases.js';
-import { IssueBillWithholdingUseCase } from './application/use-cases/withholding-use-cases.js';
 import { GetSettingsUseCase, UpdateSettingsUseCase } from './application/use-cases/settings-use-cases.js';
 import { createApp } from './interface/http/app.js';
 
@@ -57,8 +55,7 @@ async function main(): Promise<void> {
   const warehouses = new HttpWarehouseCatalog(config.INVENTORY_SERVICE_URL);
   const orderDeps = { gateway: uow, reads: repos, clock, products, taxRates, warehouses };
 
-  const billDeps = { gateway: uow, reads: repos, clock };
-  const fiscal = new HttpFiscalPort(config.FISCAL_SERVICE_URL);
+  const billDeps = { gateway: uow, reads: repos, clock, products };
 
   const app = createApp({
     useCases: {
@@ -81,7 +78,6 @@ async function main(): Promise<void> {
       postBill: new PostBillUseCase(uow, clock),
       overrideBill: new OverrideBillUseCase(uow, clock),
       voidBill: new VoidBillUseCase(uow, clock),
-      issueBillWithholding: new IssueBillWithholdingUseCase(uow, fiscal, clock),
       createOrder: new CreateOrderUseCase(orderDeps),
       updateOrder: new UpdateOrderUseCase(orderDeps),
       submitOrder: new SubmitOrderUseCase(uow, clock),

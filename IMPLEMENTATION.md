@@ -15,7 +15,7 @@ Servicio de compras del plan ERP (Fase 2, ver `PLAN-ERP.md`). **Fases 2.1 y 2.2 
 | Decisión | `POST orders/:id/approve`, `POST orders/:id/reject` | `purchase:approve` |
 | Cancelar / cerrar | `POST orders/:id/cancel` (lo aprobado exige además `purchase:cancel`), `POST orders/:id/reopen` (rechazada → borrador), `POST orders/:id/close` (da por terminado lo pendiente, con motivo) | `purchase:create` / `purchase:close` |
 | Recepciones | `GET receipts`, `GET receipts/:id`, `POST orders/:id/receipts`, `GET orders/:id/receiving` (pedido/recibido/pendiente/facturado por línea) | `purchase:read` / `receipt:create` |
-| Facturas de compra | `GET/POST bills`, `GET/PUT bills/:id`, `POST bills/:id/post\|override\|void`, `POST bills/:id/withholding` | `purchase_bill:read\|create\|update\|post\|override\|void` |
+| Facturas de compra | `GET/POST bills`, `GET/PUT bills/:id`, `POST bills/:id/post\|override\|void` | `purchase_bill:read\|create\|override\|void` — crear, editar y contabilizar van con `create` (`update`/`post` **no existen** en `auth-service`; editarlos sería dejar permisos de adorno) |
 | Política | `GET/PUT settings` (umbral de aprobación, bodega por defecto y tolerancias en puntos básicos) | `purchase:read` / `purchase:approve` |
 
 Ciclo de la orden: `draft → pending_approval → approved → partially_received → received → closed`; `rejected` vuelve a borrador; `cancelled` es final. Recibir no cambia el estado hasta cubrir todas las líneas con producto; el cierre manual (`close`, con motivo) da por terminado lo que el proveedor ya no enviará.
@@ -45,7 +45,12 @@ Ciclo de la factura: `draft → posted` | `blocked` (no cuadró la conciliación
 
 ## Lo que el contrato admite pero NO persiste (a propósito)
 
-- La factura de compra acepta `notes` en la entrada (`BillInput`) y el caso de uso lo arma, pero **no hay columna ni campo en el dominio**: se descarta. Por eso el esquema de salida `Bill` no lo publica y la UI no lo ofrece (ofrecer un campo que el servidor tira sería pérdida de datos silenciosa). Si el dueño lo quiere, hace falta una migración nueva.
+- *(vacío)* Aquí estaba el `notes` de la factura de compra hasta el 2026-10-19. Ya se persiste: migración
+  `20261020120000-add-purchase-bill-notes.cjs` (`TEXT` nulo, como `purchase_orders.notes`), campo en el modelo y en el
+  repositorio (lectura y escritura), recorte a 1000 caracteres y `''` → `null` en el caso de uso, `notes` en `toBillJSON`
+  y en el esquema `Bill` de `openapi.yaml`, y campo en el formulario + bloque en el detalle (clave i18n `common.notes`).
+  Se suma a eso que la factura **sin orden** exige `purchase_bill:create_unmatched` en el `POST` y en el `PUT`: hasta esa
+  misma fecha el permiso lo tenía concedido `auth-service` y no lo pedía ninguna ruta.
 
 ## Eventos
 
@@ -53,11 +58,12 @@ Publica (outbox → `crm.events`): `purchasing.supplier.upserted`; `purchasing.o
 
 **Contrato con inventario:** `inventory-service` consume `purchase.purchase_order.received` (`purchaseOrderId`, `organizationId`, `warehouseId`, `receiptId`, `receiptNumber`, `lines[{productId, quantity, unitCostCents, currencyCode}]`) y registra la entrada con su costo, con `referenceType: 'goods_receipt'` y `referenceId: receiptId` (`receiptId`/`receiptNumber` son campos nuevos; sin ellos, el comportamiento anterior con `purchase_order` sigue igual). La contabilidad **no** asienta esa entrada (`purchase_in` se ignora allí): la asienta la factura de compra contra proveedores, para no duplicar el inventario. Una recepción deja **dos** entradas en la bitácora (el evento del contrato y el propio): están etiquetadas distinto para que se entienda.
 
-**Retención y asiento (construidos, sin autorización de subida):** `POST bills/:id/withholding` emite la retención sobre una factura contabilizada y publica `purchasing.bill.withholding_issued`; el asiento de la compra y el de la retención los consume `accounting-service`.
+**Retención y asiento:** la retención de una compra la emite fiscal-ecuador desde su pantalla (la factura la abre con los datos precargados); purchasing la consume por `fiscal.ec.withholding.issued` —busca la factura por RUC del proveedor y número del documento sustento— y la marca `withholdingStatus: issued`, publicando `purchasing.bill.withholding_issued`. No hay llamada HTTP de purchasing a fiscal (se quitó el emisor síncrono: usaba un contrato inventado). El asiento de la compra y el de la retención los consume `accounting-service`. **Destino de cada línea:** `kind` (`stock` | `expense`) lo decide el servidor con `trackStock` del catálogo de producto; accounting asienta a inventario solo las `stock`.
 
 ## Verificación
 
-- **138 pruebas** (7 archivos): dominio (dinero, estados, proveedor, conciliación a tres vías, retención), casos de uso con repos en memoria (incluidos aislamiento, concurrencia por versión, facturación acumulada entre facturas y fallos a mitad sin dejar basura), HTTP (permisos por ruta, validación 422 con campo, 404 entre organizaciones, 502) y guardianes de persistencia/auditoría.
+- `scripts/check-openapi-routes.mjs` (`npm run verify:openapi`) coteja `openapi.yaml` con las rutas realmente montadas en `src/interface/http/routes.ts`, en las dos direcciones, sin dependencias nuevas. Corre en CI tras las pruebas. Sin este cotejo el contrato ya se desincronizó una vez (faltaba el `PUT /purchasing/bills/{id}`, además del `notes` y los métodos de la factura): el contrato se escribe a mano y nadie lo cruzaba con las rutas.
+- **142 pruebas** (7 archivos): dominio (dinero, estados, proveedor, conciliación a tres vías, retención), casos de uso con repos en memoria (incluidos aislamiento, concurrencia por versión, facturación acumulada entre facturas y fallos a mitad sin dejar basura), HTTP (permisos por ruta —incluido que una factura **sin orden** exige `purchase_bill:create_unmatched`—, validación 422 con campo, 404 entre organizaciones, 502) y guardianes de persistencia/auditoría.
 - `scripts/verify-receiving-billing.mjs` contra **MySQL real, RabbitMQ y los catálogos reales** del stack Docker: cantidad recibida en el evento, delta de stock en inventario, totales de la recepción contabilizada, **rechazo de la sobre-recepción**, dos recepciones simultáneas (no se pasa del límite), conciliación de la factura, asiento contable y eventos en la bitácora. Este script **sustituye** a los antiguos `verify-receiving.mjs` y `verify-bills.mjs`.
 - `scripts/verify-purchasing.mjs` (Fase 2.1) contra **MySQL real y los catálogos reales**: orden con importes exactos, aprobación con otra persona, dos aprobaciones simultáneas (una gana, otra 409), 30 envíos simultáneos con números seguidos, 4 ediciones simultáneas, cancelación con permisos, aislamiento entre organizaciones, listado con filtros.
 - En el navegador (CRM completo por el gateway): proveedores, nueva orden con producto buscado en el servidor, totales idénticos a los del servidor, envío y detalle; seguimiento por línea, recepción y factura con su panel de conciliación.
@@ -67,7 +73,8 @@ Publica (outbox → `crm.events`): `purchasing.supplier.upserted`; `purchasing.o
 
 - **Sin autorización para subir:** la retención en la compra y los asientos de compra/retención (construidos y probados, se quedan en el árbol hasta que el dueño diga).
 - **Sin liquidación de compra (03):** falta el XSD oficial del SRI; sin él no se valida el XML y no se inventa.
-- **La factura de compra no persiste `notes`** (ver arriba): si se quiere, va con migración nueva.
+- **`notes` de la factura y el permiso `purchase_bill:create_unmatched`: arreglados en local el 2026-10-19, sin subir**
+  (migración `20261020120000-add-purchase-bill-notes.cjs` **sin aplicar**): van con el próximo push.
 - Sin importación del XML de la factura del proveedor (hoy se teclea); sin solicitudes de compra ni comparación de cotizaciones (`purchasing.requests`, `purchasing.quote_comparison`): son pasos opcionales previos a la orden.
 - Sin devolución a proveedor ni anulación de recepción (Fase 5); la recepción es inmutable a propósito.
 - Una factura cubre **una** orden (varias órdenes por factura queda pendiente).

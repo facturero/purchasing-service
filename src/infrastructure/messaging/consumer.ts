@@ -1,6 +1,6 @@
 import { EventHandler, InboxConsumer } from '@facturero/outbox-relay';
 import type { Sequelize } from 'sequelize';
-import { HandleWithholdingIssuedUseCase } from '../../application/use-cases/withholding-use-cases.js';
+import { HandleWithholdingIssuedUseCase, type WithholdingIssuedPayload } from '../../application/use-cases/withholding-use-cases.js';
 import type { UnitOfWorkGateway } from '../../application/ports.js';
 
 /** Eventos que consume purchasing-service (ver asyncapi.yaml). */
@@ -20,14 +20,9 @@ export function buildEventHandlers(deps: ConsumerDeps): EventHandler[] {
     {
       eventType: 'fiscal.ec.withholding.issued',
       handle: async (payload: unknown): Promise<void> => {
-        const p = payload as {
-          organizationId: string;
-          billId: string;
-          documentId: string;
-          authorizationNumber: string;
-          authorizedAt: string;
-        };
-        await withholdingIssued.execute(p);
+        // El payload real de fiscal NO trae `billId`: la factura se encuentra por proveedor y número del documento sustento.
+        const result = await withholdingIssued.execute(payload as WithholdingIssuedPayload);
+        if (result.outcome === 'ignored') console.info(`[purchasing-service] retención ignorada: ${result.reason}`);
       },
     },
   ];

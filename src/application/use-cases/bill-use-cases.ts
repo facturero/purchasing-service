@@ -27,7 +27,7 @@ import {
   billUpdatedEvent,
   billVoidedEvent,
 } from '../events.js';
-import type { UnitOfWorkGateway } from '../ports.js';
+import type { ProductCatalogPort, UnitOfWorkGateway } from '../ports.js';
 import { inTransaction } from './supplier-use-cases.js';
 
 export interface CreateBillInput {
@@ -50,6 +50,32 @@ export interface BillDeps {
   gateway: UnitOfWorkGateway;
   reads: import('../../domain/repositories.js').UnitOfWork;
   clock: () => Date;
+  /** Para saber si el producto de cada línea lleva stock (inventario) o no (gasto). */
+  products: ProductCatalogPort;
+}
+
+/**
+ * Marca cada línea con si su producto lleva stock, consultando el catálogo FUERA de la transacción (como las órdenes). Una línea sin
+ * producto es gasto. Un producto que no existe es un 422; un catálogo caído es un 502: nunca se da por «gasto» lo que no se pudo consultar.
+ */
+async function withStockFlags(products: ProductCatalogPort, organizationId: string, lines: BillLineInput[]): Promise<BillLineInput[]> {
+  const cache = new Map<string, boolean>();
+  const out: BillLineInput[] = [];
+  for (const [i, line] of lines.entries()) {
+    if (!line.productId) {
+      out.push({ ...line, tracksStock: false });
+      continue;
+    }
+    let tracks = cache.get(line.productId);
+    if (tracks === undefined) {
+      const product = await products.findById(organizationId, line.productId);
+      if (!product) throw new ValidationError([{ field: `lines[${i}].productId`, message: 'El producto no existe.' }]);
+      tracks = product.tracksStock;
+      cache.set(line.productId, tracks);
+    }
+    out.push({ ...line, tracksStock: tracks });
+  }
+  return out;
 }
 
 export class CreateBillUseCase {
@@ -75,8 +101,11 @@ export class CreateBillUseCase {
       issueDate: input.issueDate,
       dueDate: input.dueDate,
       currencyCode: input.currencyCode,
-      notes: input.notes ?? null,
+      // Igual que la orden: se recorta y se limita a 1000; vacío es `null` (no cadena hueca).
+      notes: input.notes?.trim() ? input.notes.trim().slice(0, 1000) : null,
     };
+
+    const lines = await withStockFlags(this.deps.products, organizationId, input.lines);
 
     return inTransaction(this.deps.gateway, async (uow) => {
       // Duplicado por documento del proveedor: con o sin orden. Sin esta comprobación la base lo rechazaba igual pero con un
@@ -89,7 +118,7 @@ export class CreateBillUseCase {
         if (existingAuth) throw new DuplicateSupplierDocumentError('Ya existe una factura con esa autorización.');
       }
 
-      const bill = newBillDraft({ organizationId, createdBy: userId, header, lines: input.lines, now: this.deps.clock() });
+      const bill = newBillDraft({ organizationId, createdBy: userId, header, lines, now: this.deps.clock() });
 
       // Número interno FC-AAAA-NNNNNN: se quema aquí dentro de la transacción, así un fallo posterior
       // no lo deja asignado a una factura que no existe.
@@ -131,8 +160,11 @@ export class UpdateBillUseCase {
       issueDate: input.issueDate,
       dueDate: input.dueDate,
       currencyCode: input.currencyCode,
-      notes: input.notes ?? null,
+      // Igual que la orden: se recorta y se limita a 1000; vacío es `null` (no cadena hueca).
+      notes: input.notes?.trim() ? input.notes.trim().slice(0, 1000) : null,
     };
+
+    const lines = await withStockFlags(this.deps.products, organizationId, input.lines);
 
     return inTransaction(this.deps.gateway, async (uow) => {
       const current = await uow.bills.findById(organizationId, billId);
@@ -149,7 +181,7 @@ export class UpdateBillUseCase {
         if (existingAuth && existingAuth.id !== billId) throw new DuplicateSupplierDocumentError('Ya existe una factura con esa autorización.');
       }
 
-      const next = replaceBillDraft(current, header, input.lines, this.deps.clock());
+      const next = replaceBillDraft(current, header, lines, this.deps.clock());
 
       if (input.supplierTotalCents !== undefined) {
         validateSupplierTotals(input.supplierTotalCents, next.totalCents);

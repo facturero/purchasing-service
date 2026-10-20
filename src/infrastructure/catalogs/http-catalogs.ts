@@ -35,13 +35,13 @@ export class HttpProductCatalog implements ProductCatalogPort {
   constructor(private readonly baseUrl: string) {}
 
   async findById(organizationId: string, productId: string): Promise<ProductInfo | null> {
-    const data = await getJson<{ id: string; name: string; sku: string | null; status: string; taxes?: { taxRateId: string; kind: string }[] }>(
+    const data = await getJson<{ id: string; name: string; sku: string | null; status: string; trackStock?: boolean; taxes?: { taxRateId: string; kind: string }[] }>(
       `${this.baseUrl}/products/${encodeURIComponent(productId)}`,
       { 'X-Organization-Id': organizationId, 'X-Permissions': 'product:read' },
       'el producto',
     );
     if (!data) return null;
-    return { id: data.id, name: data.name, sku: data.sku ?? null, status: data.status, taxes: (data.taxes ?? []).map((t) => ({ taxRateId: t.taxRateId, kind: t.kind })) };
+    return { id: data.id, name: data.name, sku: data.sku ?? null, status: data.status, tracksStock: data.trackStock === true, taxes: (data.taxes ?? []).map((t) => ({ taxRateId: t.taxRateId, kind: t.kind })) };
   }
 }
 

@@ -41,6 +41,12 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check openapi.yaml vs routes
+        run: node scripts/check-openapi-routes.mjs
+
+      - name: Check asyncapi.yaml vs events
+        run: node scripts/check-asyncapi-events.mjs
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:

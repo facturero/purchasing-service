@@ -50,6 +50,18 @@ export interface BillRepository {
   findById(organizationId: string, id: string, options?: { lock?: boolean }): Promise<PurchaseBill | null>;
   findBySupplierDocument(organizationId: string, supplierId: string, docType: SupplierDocType, establishment: string, emissionPoint: string, sequential: string): Promise<PurchaseBill | null>;
   findByAuthorization(organizationId: string, authorizationNumber: string): Promise<PurchaseBill | null>;
+  /**
+   * La factura que cita un comprobante de retención. Fiscal no conoce nuestro id de factura: solo el RUC del proveedor y el número
+   * del documento sustento (`001-002-000000123`), que es justo lo que identifica la factura del proveedor.
+   */
+  findBySupplierIdentificationDocument(
+    organizationId: string,
+    supplierIdentification: string,
+    docType: SupplierDocType,
+    establishment: string,
+    emissionPoint: string,
+    sequential: string,
+  ): Promise<PurchaseBill | null>;
   list(organizationId: string, filters: BillFilters): Promise<Page<PurchaseBill>>;
   /**
    * Alta (`expectedVersion` omitido) o cambio con optimistic locking: si la fila ya cambió desde que se

@@ -661,6 +661,7 @@ components:
         lineNumber: { type: integer }
         orderLineId: { type: string, format: uuid, nullable: true }
         productId: { type: string, format: uuid, nullable: true }
+        kind: { type: string, enum: [stock, expense], description: 'A dónde va la compra de la línea: inventario si el producto lleva stock, gasto si no (servicio, suministro o línea sin producto). Lo decide el servidor con el catálogo de producto' }
         description: { type: string }
         quantity: { type: string }
         unitCostCents: { type: integer }
@@ -691,6 +692,7 @@ components:
         issueDate: { type: string, format: date }
         dueDate: { type: string, format: date }
         currencyCode: { type: string }
+        notes: { type: string, nullable: true }
         subtotalCents: { type: integer }
         taxCents: { type: integer }
         totalCents: { type: integer }

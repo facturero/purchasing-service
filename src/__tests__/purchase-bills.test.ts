@@ -1,14 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
+  CatalogUnavailableError,
   BillNotEditableError,
   BillNotFoundError,
   BillNotOverridableError,
-  BillNotPostedError,
   BillNotPostableError,
   BillNotVoidableError,
   ConcurrentUpdateError,
   DuplicateSupplierDocumentError,
-  FiscalServiceUnavailableError,
   SelfOverrideError,
   TotalsMismatchError,
   ValidationError,
@@ -32,6 +31,7 @@ import {
   ORG_A,
   ORG_B,
   PRODUCT_1,
+  PRODUCT_2,
   USER_1,
   USER_2,
   buildPurchasing,
@@ -273,6 +273,29 @@ describe('casos de uso de factura de compra', () => {
     expect(store.eventTypes()).toContain('purchasing.bill.created');
   });
 
+  it('guarda las notas y las devuelve en el detalle; editar las reescribe', async () => {
+    const { supplier: s, order, orderLineId } = await receivedOrder();
+    const input = billInput(s.id, { purchaseOrderId: order.id, notes: '  llega con retraso  ', lines: [billLine({ orderLineId, productId: PRODUCT_1 })] });
+    const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input });
+    // Se recorta al guardar y queda en la fila, no solo en la respuesta.
+    expect(bill.notes).toBe('llega con retraso');
+    expect(store.billMap.get(bill.id)!.notes).toBe('llega con retraso');
+    const loaded = await p.uc.getBill.execute({ organizationId: ORG_A, billId: bill.id });
+    expect(loaded.notes).toBe('llega con retraso');
+
+    const edited = await p.uc.updateBill.execute({ organizationId: ORG_A, billId: bill.id, input: { ...input, notes: ' corregido ' } });
+    expect(edited).toMatchObject({ notes: 'corregido', version: 2 });
+    expect(store.billMap.get(bill.id)!.notes).toBe('corregido');
+  });
+
+  it('las notas vacías o ausentes quedan en null (no en cadena hueca)', async () => {
+    const s = await supplier();
+    const blank = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: null, notes: '   ' }) });
+    expect(blank.notes).toBeNull();
+    const none = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: null, sequential: '000000999' }) });
+    expect(none.notes).toBeNull();
+  });
+
   it('no acepta dos veces el documento del proveedor ni la misma autorización', async () => {
     const { supplier: s, order } = await receivedOrder();
     const input = billInput(s.id, { purchaseOrderId: order.id, lines: [billLine({ orderLineId: order.lines[0]!.id })] });
@@ -396,35 +419,6 @@ describe('casos de uso de factura de compra', () => {
     ).rejects.toThrow(BillNotEditableError);
   });
 
-  it('la retención se emite contra fiscal una sola vez, y si fiscal no responde, no se marca', async () => {
-    const { supplier: s, order, orderLineId } = await receivedOrder();
-    const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: order.id, lines: [billLine({ orderLineId })] }) });
-    // Un borrador no puede llevar retención.
-    await expect(
-      p.uc.issueBillWithholding.execute({ organizationId: ORG_A, userId: USER_1, input: { billId: bill.id, withholdingLines: [{ taxCode: '725', taxPercentage: '1.75', baseCents: 2500, taxCents: 44 }] } }),
-    ).rejects.toThrow(BillNotPostedError);
-
-    await p.uc.postBill.execute({ organizationId: ORG_A, billId: bill.id });
-    const issued = await p.uc.issueBillWithholding.execute({ organizationId: ORG_A, userId: USER_1, input: { billId: bill.id, withholdingLines: [{ taxCode: '725', taxPercentage: '1.75', baseCents: 2500, taxCents: 44 }] } });
-    expect(issued.withholdingStatus).toBe('issued');
-    expect(store.eventTypes()).toContain('purchasing.bill.withholding_issued');
-    expect(p.fiscal.issued).toHaveLength(1);
-
-    await expect(
-      p.uc.issueBillWithholding.execute({ organizationId: ORG_A, userId: USER_1, input: { billId: bill.id, withholdingLines: [{ taxCode: '725', taxPercentage: '1.75', baseCents: 2500, taxCents: 44 }] } }),
-    ).rejects.toThrow(WithholdingAlreadyIssuedError);
-
-    // Si fiscal está caído, la factura no queda marcada. (La otra factura va sin orden para que sí
-    // llegue a `posted`: contra la misma orden ya está el cupo ocupado por la primera.)
-    const other = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { sequential: '000000777' }) });
-    await p.uc.postBill.execute({ organizationId: ORG_A, billId: other.id });
-    p.fiscal.down = true;
-    await expect(
-      p.uc.issueBillWithholding.execute({ organizationId: ORG_A, userId: USER_1, input: { billId: other.id, withholdingLines: [{ taxCode: '725', taxPercentage: '1.75', baseCents: 2500, taxCents: 44 }] } }),
-    ).rejects.toThrow(FiscalServiceUnavailableError);
-    expect((await p.uc.getBill.execute({ organizationId: ORG_A, billId: other.id })).withholdingStatus).toBe('none');
-  });
-
   it('las tolerancias las fija el administrador por la API de settings', async () => {
     const saved = await p.uc.updateSettings.execute({ organizationId: ORG_A, changes: { priceToleranceBp: 1000, qtyToleranceBp: 200, overReceiptToleranceBp: 100 } });
     expect(saved).toMatchObject({ priceToleranceBp: 1000, qtyToleranceBp: 200, overReceiptToleranceBp: 100 });
@@ -433,7 +427,7 @@ describe('casos de uso de factura de compra', () => {
 });
 
 describe('factura de compra por HTTP', () => {
-  const ALL = ['supplier:manage', 'supplier:read', 'purchase:read', 'purchase:create', 'purchase:approve', 'purchase:close', 'receipt:create', 'purchase_bill:read', 'purchase_bill:create', 'purchase_bill:update', 'purchase_bill:post', 'purchase_bill:void'];
+  const ALL = ['supplier:manage', 'supplier:read', 'purchase:read', 'purchase:create', 'purchase:approve', 'purchase:close', 'receipt:create', 'purchase_bill:read', 'purchase_bill:create', 'purchase_bill:create_unmatched', 'purchase_bill:update', 'purchase_bill:post', 'purchase_bill:void'];
   const call = async (method: string, path: string, body?: unknown, perms: string[] = ALL) => {
     const res = await p.app.request(path, {
       method,
@@ -470,6 +464,29 @@ describe('factura de compra por HTTP', () => {
     expect(posted.json).toMatchObject({ status: 'posted', matchStatus: 'matched' });
   });
 
+  it('las notas viajan de la entrada a la respuesta y al detalle', async () => {
+    const { supplier: s } = await approvedOrder();
+    const body = {
+      supplierId: s.id,
+      docType: '01',
+      establishment: '001',
+      emissionPoint: '002',
+      sequential: '000000123',
+      issueDate: '2026-10-20',
+      dueDate: '2026-11-20',
+      currencyCode: 'USD',
+      notes: 'entregar en bodega tras las 15:00',
+      lines: [{ description: 'Papel bond A4', quantity: '10', unitCostCents: 250, taxRatePct: '15.00' }],
+    };
+    const created = await call('POST', '/purchasing/bills', body);
+    expect(created.status).toBe(201);
+    expect(created.json.notes).toBe('entregar en bodega tras las 15:00');
+
+    const detail = await call('GET', `/purchasing/bills/${created.json.id}`);
+    expect(detail.status).toBe(200);
+    expect(detail.json.notes).toBe('entregar en bodega tras las 15:00');
+  });
+
   it('rechaza una cantidad que no es número con 422, no con un 500', async () => {
     const { supplier: s } = await approvedOrder();
     const body = {
@@ -500,5 +517,72 @@ describe('factura de compra por HTTP', () => {
     const res = await call('GET', '/purchasing/bills', undefined, ['purchase:read']);
     expect(res.status).toBe(403);
   });
+
+  it('una factura sin orden exige el permiso propio (crear facturas sueltas)', async () => {
+    const { supplier: s } = await approvedOrder();
+    const body = {
+      supplierId: s.id,
+      docType: '01',
+      establishment: '001',
+      emissionPoint: '002',
+      sequential: '000000999',
+      issueDate: '2026-10-20',
+      dueDate: '2026-11-20',
+      currencyCode: 'USD',
+      lines: [{ description: 'Papel bond A4', quantity: '10', unitCostCents: 250, taxRatePct: '15.00' }],
+    };
+    // Sin orden no hay conciliación a tres vías que respalde la factura: `purchase_bill:create` (que también tiene
+    // Supervisor) no basta, y antes de esta comprobación el permiso `purchase_bill:create_unmatched` no lo pedía nadie.
+    const sinPermiso = await call('POST', '/purchasing/bills', body, ALL.filter((perm) => perm !== 'purchase_bill:create_unmatched'));
+    expect(sinPermiso.status).toBe(403);
+
+    const conPermiso = await call('POST', '/purchasing/bills', body);
+    expect(conPermiso.status).toBe(201);
+  });
 });
 
+describe('destino de cada línea de la factura: inventario o gasto', () => {
+  // Regresión: el evento decía «tiene producto → inventario», y la compra de un servicio (o de un suministro que no lleva stock)
+  // se asentaba como mercadería. Ahora lo decide el catálogo de producto al registrar la línea.
+  const postedEvent = () => store.outboxEvents.filter((e) => e.type === 'purchasing.bill.posted').at(-1)!.payload as { lines: Array<{ kind: string; productId: string | null }> };
+
+  it('un producto que lleva stock es «stock»; un servicio y una línea sin producto son «expense»', async () => {
+    const s = await supplier();
+    const bill = await p.uc.createBill.execute({
+      organizationId: ORG_A, userId: USER_1,
+      input: billInput(s.id, { lines: [billLine({ productId: PRODUCT_1 }), billLine({ productId: PRODUCT_2, description: 'Limpieza' }), billLine({ description: 'Flete' })] }),
+    });
+    expect(bill.lines.map((l) => l.kind)).toEqual(['stock', 'expense', 'expense']);
+    await p.uc.postBill.execute({ organizationId: ORG_A, billId: bill.id });
+    expect(postedEvent().lines.map((l) => l.kind)).toEqual(['stock', 'expense', 'expense']);
+  });
+
+  it('editar la factura vuelve a decidirlo con el catálogo', async () => {
+    const s = await supplier();
+    const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { lines: [billLine({ productId: PRODUCT_1 })] }) });
+    const edited = await p.uc.updateBill.execute({ organizationId: ORG_A, billId: bill.id, input: billInput(s.id, { lines: [billLine({ productId: PRODUCT_2 })] }) });
+    expect(edited.lines[0]!.kind).toBe('expense');
+  });
+
+  it('un producto que no existe en el catálogo es un 422, no un gasto', async () => {
+    const s = await supplier();
+    await expect(
+      p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { lines: [billLine({ productId: '11111111-1111-4111-8111-111111111111' })] }) }),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it('si el catálogo no responde se rechaza (502) en vez de suponer que es gasto', async () => {
+    const s = await supplier();
+    p.catalogs.down = true;
+    await expect(
+      p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { lines: [billLine({ productId: PRODUCT_1 })] }) }),
+    ).rejects.toThrow(CatalogUnavailableError);
+  });
+
+  it('una línea sin producto no necesita consultar el catálogo', async () => {
+    const s = await supplier();
+    p.catalogs.down = true;
+    const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { lines: [billLine({ description: 'Flete' })] }) });
+    expect(bill.lines[0]!.kind).toBe('expense');
+  });
+});

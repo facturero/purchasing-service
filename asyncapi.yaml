@@ -3,8 +3,8 @@ info:
   title: purchasing-service — eventos
   version: 1.0.0
   description: >-
-    purchasing-service PUBLICA estos eventos en el exchange `crm.events` (patrón Outbox, @facturero/outbox-relay). Todavía no consume
-    ninguno. Todo payload lleva `organizationId` y, añadidos por el relay, actor, IP y request-id. Los importes van en centavos de la
+    purchasing-service PUBLICA estos eventos en el exchange `crm.events` (patrón Outbox, @facturero/outbox-relay) y CONSUME uno:
+    `fiscal.ec.withholding.issued` (ver su canal más abajo). Todo payload lleva `organizationId` y, añadidos por el relay, actor, IP y request-id. Los importes van en centavos de la
     moneda de la orden; las cantidades, como texto (hasta 6 decimales).
 channels:
   purchasing.supplier.upserted:
@@ -144,31 +144,79 @@ channels:
       summary: Factura bloqueada por conciliación a tres vías
       message:
         payload:
-          type: object
-          properties:
-            $ref: '#/components/schemas/BillPayload'
-            matchReasons: { type: array, items: { type: object } }
+          allOf:
+            - $ref: '#/components/schemas/BillPayload'
+            - type: object
+              properties:
+                matchReasons: { type: array, items: { type: object } }
 
   purchasing.bill.overridden:
     publish:
       summary: Factura aprobada con excepción (override por otra persona)
       message:
         payload:
-          type: object
-          properties:
-            $ref: '#/components/schemas/BillPayload'
-            overrideReason: { type: string }
-            overrideBy: { type: string, format: uuid }
+          allOf:
+            - $ref: '#/components/schemas/BillPayload'
+            - type: object
+              properties:
+                overrideReason: { type: string }
+                overrideBy: { type: string, format: uuid }
 
   purchasing.bill.voided:
     publish:
       summary: Factura de compra anulada
       message:
         payload:
+          allOf:
+            - $ref: '#/components/schemas/BillPayload'
+            - type: object
+              properties:
+                voidReason: { type: string }
+
+  purchasing.bill.withholding_issued:
+    publish:
+      summary: Una retención autorizada cita esta factura de compra (la factura pasa a withholdingStatus = issued)
+      description: >-
+        Se publica cuando purchasing consume `fiscal.ec.withholding.issued` y encuentra la factura CONTABILIZADA que la retención cita
+        (por RUC del proveedor y número del documento sustento). La factura no guarda el id del comprobante: aquí queda el rastro.
+      message:
+        payload:
+          allOf:
+            - $ref: '#/components/schemas/BillPayload'
+            - type: object
+              properties:
+                withholdingDocumentId: { type: string, description: 'Id de la retención en fiscal-ecuador (`withholdingId` del evento consumido)' }
+                withholdingNumber: { type: string, nullable: true, example: 001-001-000000007 }
+                withholdingAuthorization: { type: string, nullable: true, description: Número de autorización del SRI }
+
+  fiscal.ec.withholding.issued:
+    subscribe:
+      summary: CONSUMIDO — una retención emitida por fiscal-ecuador quedó autorizada por el SRI
+      description: >-
+        Lo publica fiscal-ecuador (no este servicio). NO trae ningún id de factura de compra: fiscal no sabe que existe este módulo.
+        Purchasing busca la factura por `supplier.identification` + `support.documentCode` + `support.number` (000-000-000000000,
+        establecimiento-punto-secuencial) dentro de la organización. Si no hay factura, o no está contabilizada, o ya tiene retención,
+        el mensaje se IGNORA sin fallar (casi todas las retenciones son de compras que no pasaron por este módulo). Idempotente.
+      message:
+        payload:
           type: object
+          required: [organizationId, withholdingId]
           properties:
-            $ref: '#/components/schemas/BillPayload'
-            voidReason: { type: string }
+            organizationId: { type: string, format: uuid }
+            withholdingId: { type: string, description: Id de la retención en fiscal-ecuador }
+            number: { type: string, example: 001-001-000000007, description: Número del comprobante de retención }
+            authorizationNumber: { type: string, nullable: true }
+            supplier:
+              type: object
+              properties:
+                identification: { type: string }
+                businessName: { type: string }
+            support:
+              type: object
+              properties:
+                documentCode: { type: string, example: '01', description: 'Solo 01, 03 y 41 pueden ser una factura de compra' }
+                number: { type: string, example: 001-002-000000123 }
+                issueDate: { type: string, format: date }
 
   purchase.purchase_order.received:
     publish:

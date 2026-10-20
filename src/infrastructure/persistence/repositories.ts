@@ -436,6 +436,7 @@ function billRepository(tx?: Transaction): BillRepository {
     issueDate: String(m.issue_date),
     dueDate: String(m.due_date),
     currencyCode: m.currency_code,
+    notes: m.notes,
     subtotalCents: Number(m.subtotal_cents),
     taxCents: Number(m.tax_cents),
     totalCents: Number(m.total_cents),
@@ -459,6 +460,7 @@ function billRepository(tx?: Transaction): BillRepository {
     lineNumber: m.line_number,
     orderLineId: m.order_line_id,
     productId: m.product_id,
+    kind: m.kind === 'stock' ? 'stock' : 'expense',
     description: m.description,
     quantityMicros: BigInt(m.quantity_micros),
     unitCostCents: Number(m.unit_cost_cents),
@@ -492,6 +494,7 @@ function billRepository(tx?: Transaction): BillRepository {
     issue_date: b.issueDate,
     due_date: b.dueDate,
     currency_code: b.currencyCode,
+    notes: b.notes,
     subtotal_cents: b.subtotalCents,
     tax_cents: b.taxCents,
     total_cents: b.totalCents,
@@ -529,6 +532,20 @@ function billRepository(tx?: Transaction): BillRepository {
     async findBySupplierDocument(organizationId, supplierId, docType, establishment, emissionPoint, sequential) {
       const row = await PurchaseBillModel.findOne({
         where: { organization_id: organizationId, supplier_id: supplierId, doc_type: docType, establishment, emission_point: emissionPoint, sequential },
+        transaction: tx,
+      });
+      return row ? toBill(row) : null;
+    },
+    async findBySupplierIdentificationDocument(organizationId, supplierIdentification, docType, establishment, emissionPoint, sequential) {
+      const row = await PurchaseBillModel.findOne({
+        where: {
+          organization_id: organizationId,
+          supplier_identification: supplierIdentification,
+          doc_type: docType,
+          establishment,
+          emission_point: emissionPoint,
+          sequential,
+        },
         transaction: tx,
       });
       return row ? toBill(row) : null;
@@ -607,6 +624,7 @@ function billRepository(tx?: Transaction): BillRepository {
           irbpnr_cents: l.irbpnrCents,
           total_cents: l.totalCents,
           expense_account_hint: l.expenseAccountHint,
+          kind: l.kind,
           price_variance_cents: l.priceVarianceCents,
         })),
         { transaction: tx },

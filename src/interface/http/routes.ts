@@ -33,9 +33,8 @@ import type {
   VoidBillUseCase,
 } from '../../application/use-cases/bill-use-cases.js';
 import type { GetSettingsUseCase, UpdateSettingsUseCase } from '../../application/use-cases/settings-use-cases.js';
-import type { IssueBillWithholdingUseCase } from '../../application/use-cases/withholding-use-cases.js';
 import type { OrderStatus } from '../../domain/purchase-order.js';
-import { type ContextVariables, requireOrganization, requirePermission, requireUser } from './middlewares.js';
+import { assertCanBillWithoutOrder, type ContextVariables, requireOrganization, requirePermission, requireUser } from './middlewares.js';
 import {
   billQuerySchema,
   billSchema,
@@ -88,7 +87,6 @@ export interface AppDependencies {
     cancelOrder: CancelOrderUseCase;
     receiveOrder: ReceiveOrderUseCase;
     closeOrder: CloseOrderUseCase;
-    issueBillWithholding: IssueBillWithholdingUseCase;
   };
   corsOrigin: string;
 }
@@ -224,6 +222,7 @@ export function purchasingRoutes(deps: AppDependencies): Hono<Vars> {
 
   r.post('/purchasing/bills', ...base, requireUser(), requirePermission('purchase_bill:create'), validateJson(billSchema), async (c) => {
     const input = c.req.valid('json' as never) as z.infer<typeof billSchema>;
+    assertCanBillWithoutOrder(input.purchaseOrderId, c.get('permissions') ?? []);
     const bill = await uc.createBill.execute({
       organizationId: org(c),
       userId: user(c),
@@ -237,6 +236,7 @@ export function purchasingRoutes(deps: AppDependencies): Hono<Vars> {
 
   r.put('/purchasing/bills/:id', ...base, requireUser(), requirePermission('purchase_bill:create'), validateJson(billSchema), async (c) => {
     const input = c.req.valid('json' as never) as z.infer<typeof billSchema>;
+    assertCanBillWithoutOrder(input.purchaseOrderId, c.get('permissions') ?? []);
     const bill = await uc.updateBill.execute({
       organizationId: org(c),
       billId: c.req.param('id'),

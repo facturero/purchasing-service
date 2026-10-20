@@ -12,6 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify:openapi": "node scripts/check-openapi-routes.mjs",
+    "verify:asyncapi": "node scripts/check-asyncapi-events.mjs",
     "db:migrate": "sequelize-cli db:migrate",
     "db:migrate:undo": "sequelize-cli db:migrate:undo"
   },

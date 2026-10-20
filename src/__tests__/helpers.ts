@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import type {
-  FiscalPort,
   ProductCatalogPort,
   ProductInfo,
   TaxRatePort,
@@ -37,7 +36,6 @@ import {
   UpdateBillUseCase,
   VoidBillUseCase,
 } from '../application/use-cases/bill-use-cases.js';
-import { IssueBillWithholdingUseCase } from '../application/use-cases/withholding-use-cases.js';
 import {
   CreateSupplierUseCase,
   GetSupplierUseCase,
@@ -45,7 +43,7 @@ import {
   SetSupplierStatusUseCase,
   UpdateSupplierUseCase,
 } from '../application/use-cases/supplier-use-cases.js';
-import { CatalogUnavailableError, ConcurrentUpdateError, FiscalServiceUnavailableError } from '../domain/errors.js';
+import { CatalogUnavailableError, ConcurrentUpdateError } from '../domain/errors.js';
 import type { PurchaseOrder } from '../domain/purchase-order.js';
 import type { BillLine, PurchaseBill } from '../domain/purchase-bill.js';
 import type {
@@ -216,6 +214,18 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
       );
       return found ? clone(found) : null;
     },
+    findBySupplierIdentificationDocument: async (org, identification, docType, establishment, emissionPoint, sequential) => {
+      const found = [...this.billMap.values()].find(
+        (b) =>
+          b.organizationId === org &&
+          b.supplier.identification === identification &&
+          b.docType === docType &&
+          b.establishment === establishment &&
+          b.emissionPoint === emissionPoint &&
+          b.sequential === sequential,
+      );
+      return found ? clone(found) : null;
+    },
     findByAuthorization: async (org, authorizationNumber) => {
       const found = [...this.billMap.values()].find((b) => b.organizationId === org && b.authorizationNumber === authorizationNumber);
       return found ? clone(found) : null;
@@ -340,8 +350,8 @@ function paginate<T>(items: T[], page: number, pageSize: number): Page<T> {
 export class FakeCatalogs implements ProductCatalogPort, TaxRatePort, WarehouseCatalogPort {
   down = false;
   products = new Map<string, ProductInfo>([
-    [PRODUCT_1, { id: PRODUCT_1, name: 'Papel bond A4', sku: 'PAP-A4', status: 'active', taxes: [{ taxRateId: IVA15, kind: 'vat' }] }],
-    [PRODUCT_2, { id: PRODUCT_2, name: 'Servicio de limpieza', sku: null, status: 'active', taxes: [{ taxRateId: IVA0, kind: 'vat' }] }],
+    [PRODUCT_1, { id: PRODUCT_1, name: 'Papel bond A4', sku: 'PAP-A4', status: 'active', tracksStock: true, taxes: [{ taxRateId: IVA15, kind: 'vat' }] }],
+    [PRODUCT_2, { id: PRODUCT_2, name: 'Servicio de limpieza', sku: null, status: 'active', tracksStock: false, taxes: [{ taxRateId: IVA0, kind: 'vat' }] }],
   ]);
   rates = new Map([
     [IVA15, { id: IVA15, percentage: '15', kind: 'vat' }],
@@ -363,28 +373,12 @@ export class FakeCatalogs implements ProductCatalogPort, TaxRatePort, WarehouseC
   }
 }
 
-export class FakeFiscal implements FiscalPort {
-  down = false;
-  readonly issued: Array<{ billId: string; idempotencyKey: string }> = [];
-  async issueWithholding(params: {
-    organizationId: string;
-    billId: string;
-    idempotencyKey: string;
-    withholdingLines: Array<{ taxCode: string; taxPercentage: string; baseCents: number; taxCents: number }>;
-  }) {
-    if (this.down) throw new FiscalServiceUnavailableError();
-    this.issued.push({ billId: params.billId, idempotencyKey: params.idempotencyKey });
-    return { documentId: `wd-${params.billId}`, authorizationNumber: 'AUTH-WD-1', authorizedAt: '2026-10-20' };
-  }
-}
-
 export function buildPurchasing(store: InMemoryStore, now: () => Date = () => new Date('2026-10-20T15:00:00Z')) {
   const catalogs = new FakeCatalogs();
-  const fiscal = new FakeFiscal();
   const products: ProductCatalogPort = { findById: (org, id) => catalogs.findById(org, id) as Promise<ProductInfo | null> };
   const warehouses: WarehouseCatalogPort = { findById: (org, id) => catalogs.findById(org, id) as never };
   const orderDeps: OrderDeps = { gateway: store, reads: store, clock: now, products, taxRates: catalogs, warehouses };
-  const billDeps = { gateway: store, reads: store, clock: now };
+  const billDeps = { gateway: store, reads: store, clock: now, products };
   const uc = {
     getSettings: new GetSettingsUseCase(store, now),
     updateSettings: new UpdateSettingsUseCase(store, now, warehouses),
@@ -414,10 +408,9 @@ export function buildPurchasing(store: InMemoryStore, now: () => Date = () => ne
     postBill: new PostBillUseCase(store, now),
     overrideBill: new OverrideBillUseCase(store, now),
     voidBill: new VoidBillUseCase(store, now),
-    issueBillWithholding: new IssueBillWithholdingUseCase(store, fiscal, now),
   };
   const deps: AppDependencies = { useCases: uc, corsOrigin: '*' };
-  return { uc, catalogs, fiscal, app: createApp(deps) };
+  return { uc, catalogs, app: createApp(deps) };
 }
 
 export const supplierInput = (over: Record<string, unknown> = {}) => ({

@@ -231,15 +231,3 @@ export class WithholdingAlreadyIssuedError extends AppError {
   readonly httpStatus = 409;
   constructor(message = 'Esta factura ya tiene una retención emitida.') { super(message); }
 }
-
-export class BillNotPostedError extends AppError {
-  readonly code = 'BILL_NOT_POSTED';
-  readonly httpStatus = 409;
-  constructor(message = 'Solo facturas contabilizadas (posted) pueden tener retención.') { super(message); }
-}
-
-export class FiscalServiceUnavailableError extends AppError {
-  readonly code = 'FISCAL_SERVICE_UNAVAILABLE';
-  readonly httpStatus = 502;
-  constructor(message = 'El servicio fiscal no responde. Reintenta en un momento.') { super(message); }
-}

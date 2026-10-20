@@ -244,6 +244,7 @@ export class PurchaseBillModel extends Model<InferAttributes<PurchaseBillModel>,
   declare issue_date: string;
   declare due_date: string;
   declare currency_code: string;
+  declare notes: string | null;
   declare subtotal_cents: string | number;
   declare tax_cents: string | number;
   declare total_cents: string | number;
@@ -279,6 +280,7 @@ PurchaseBillModel.init(
     issue_date: { type: DataTypes.DATEONLY, allowNull: false },
     due_date: { type: DataTypes.DATEONLY, allowNull: false },
     currency_code: { type: DataTypes.CHAR(3), allowNull: false },
+    notes: { type: DataTypes.TEXT, allowNull: true },
     subtotal_cents: { type: DataTypes.BIGINT, allowNull: false },
     tax_cents: { type: DataTypes.BIGINT, allowNull: false },
     total_cents: { type: DataTypes.BIGINT, allowNull: false },
@@ -318,6 +320,7 @@ export class PurchaseBillLineModel extends Model<InferAttributes<PurchaseBillLin
   declare irbpnr_cents: string | number;
   declare total_cents: string | number;
   declare expense_account_hint: string | null;
+  declare kind: string;
   declare price_variance_cents: string | number;
 }
 
@@ -342,6 +345,7 @@ PurchaseBillLineModel.init(
     irbpnr_cents: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0 },
     total_cents: { type: DataTypes.BIGINT, allowNull: false },
     expense_account_hint: { type: DataTypes.STRING(60), allowNull: true },
+    kind: { type: DataTypes.STRING(10), allowNull: false, defaultValue: 'expense' },
     price_variance_cents: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0 },
   },
   { sequelize, tableName: 'purchase_bill_lines', timestamps: false },
