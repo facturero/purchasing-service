@@ -396,6 +396,24 @@ describe('casos de uso de factura de compra', () => {
     expect(store.eventTypes()).toContain('purchasing.bill.overridden');
   });
 
+  // Regresión: la excepción solo publicaba `bill.overridden`; contabilidad asienta únicamente `bill.posted`, así que la factura
+  // quedaba contabilizada en compras pero SIN asiento, y al anularla no había nada que reversar.
+  it('la excepción publica TAMBIÉN purchasing.bill.posted, con la diferencia de precio, para que contabilidad la asiente', async () => {
+    const { supplier: s, order, orderLineId } = await receivedOrder();
+    const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: order.id, lines: [billLine({ orderLineId, productId: PRODUCT_1, unitCostCents: 300 })] }) });
+    await p.uc.postBill.execute({ organizationId: ORG_A, billId: bill.id });
+    expect(store.eventTypes()).not.toContain('purchasing.bill.posted'); // bloqueada: aún no hay nada que asentar
+
+    await p.uc.overrideBill.execute({ organizationId: ORG_A, billId: bill.id, userId: USER_2, reason: 'Precio acordado con el proveedor' });
+
+    const posted = store.outboxEvents.filter((e) => e.type === 'purchasing.bill.posted');
+    expect(posted).toHaveLength(1);
+    const payload = posted[0]!.payload as { matchStatus: string; billId: string; lines: Array<{ priceVarianceCents: number; kind: string }> };
+    expect(payload).toMatchObject({ billId: bill.id, matchStatus: 'overridden' });
+    // 10 × 3,00 = 3000 contra 10 × 2,50 = 2500 de la orden: la diferencia de 500 viaja en la línea.
+    expect(payload.lines[0]).toMatchObject({ priceVarianceCents: 500, kind: 'stock' });
+  });
+
   it('se edita mientras es borrador y se guarda con control de versión', async () => {
     const { supplier: s, order, orderLineId } = await receivedOrder();
     const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: order.id, lines: [billLine({ orderLineId })] }) });

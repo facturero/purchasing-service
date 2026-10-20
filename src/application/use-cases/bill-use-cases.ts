@@ -286,6 +286,10 @@ export class OverrideBillUseCase {
       const overridden = overrideBill(bill, userId, reason, now);
       await uow.bills.save(overridden, bill.version);
       await uow.outbox.add(billOverriddenEvent(overridden));
+      // La excepción convierte una factura bloqueada en CONTABILIZADA: contabilidad solo asienta `purchasing.bill.posted`, así que sin
+      // este evento la factura quedaba «posted» sin asiento (y su anulación no tenía nada que reversar). Apareció al probar la
+      // pantalla completa: los scripts solo miraban la bitácora.
+      await uow.outbox.add(billPostedEvent(overridden));
       return overridden;
     });
   }
