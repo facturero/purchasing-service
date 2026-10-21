@@ -373,7 +373,13 @@ function receiptRepository(tx?: Transaction): ReceiptRepository {
         offset: (filters.page - 1) * filters.pageSize,
         transaction: tx,
       });
-      return { items: rows.map(toReceipt), total: count, page: filters.page, pageSize: filters.pageSize };
+      // El listado muestra `lineCount`: sin cargar las líneas de la página saldría siempre 0.
+      const lineRows = rows.length
+        ? await GoodsReceiptLineModel.findAll({ where: { receipt_id: rows.map((r) => r.id) }, order: [['id', 'ASC']], transaction: tx })
+        : [];
+      const byReceipt = new Map<string, GoodsReceiptLine[]>();
+      for (const l of lineRows) byReceipt.set(l.receipt_id, [...(byReceipt.get(l.receipt_id) ?? []), toLine(l)]);
+      return { items: rows.map((r) => ({ ...toReceipt(r), lines: byReceipt.get(r.id) ?? [] })), total: count, page: filters.page, pageSize: filters.pageSize };
     },
     async save(receipt: GoodsReceipt) {
       const fields = {
@@ -577,7 +583,17 @@ function billRepository(tx?: Transaction): BillRepository {
         offset: (filters.page - 1) * filters.pageSize,
         transaction: tx,
       });
-      return { items: rows.map(toBill), total: count, page: filters.page, pageSize: filters.pageSize };
+      // Igual que en recepciones: el listado expone `lineCount`, así que se cargan las líneas de la página en una consulta.
+      const lineRows = rows.length
+        ? await PurchaseBillLineModel.findAll({
+            where: { bill_id: rows.map((r) => r.id), organization_id: organizationId },
+            order: [['line_number', 'ASC']],
+            transaction: tx,
+          })
+        : [];
+      const byBill = new Map<string, BillLine[]>();
+      for (const l of lineRows) byBill.set(l.bill_id, [...(byBill.get(l.bill_id) ?? []), toLine(l)]);
+      return { items: rows.map((r) => ({ ...toBill(r), lines: byBill.get(r.id) ?? [] })), total: count, page: filters.page, pageSize: filters.pageSize };
     },
     async save(bill: PurchaseBill, expectedVersion?: number | null) {
       const exists = await PurchaseBillModel.findOne({ where: { id: bill.id }, transaction: tx });
