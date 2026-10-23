@@ -206,9 +206,22 @@ channels:
             withholdingId: { type: string, description: Id de la retención en fiscal-ecuador }
             number: { type: string, example: 001-001-000000007, description: Número del comprobante de retención }
             authorizationNumber: { type: string, nullable: true }
+            fiscalPeriod: { type: string, example: 10/2026 }
+            lines:
+              type: array
+              description: Detalle por concepto de retención (lo usan los anexos 103 y ATS; compras no lo necesita)
+              items:
+                type: object
+                properties:
+                  tax: { type: string, enum: [income, vat, isd] }
+                  retentionCode: { type: string, example: '312' }
+                  baseCents: { type: integer }
+                  ratePercent: { type: number }
+                  amountCents: { type: integer }
             supplier:
               type: object
               properties:
+                identificationType: { type: string, example: RUC }
                 identification: { type: string }
                 businessName: { type: string }
             support:
@@ -276,8 +289,26 @@ components:
         billId: { type: string, format: uuid }
         internalNumber: { type: string, nullable: true, example: FC-2026-000001 }
         supplierId: { type: string, format: uuid }
-        supplier: { type: object, properties: { identification: { type: string }, legalName: { type: string } } }
+        supplier:
+          type: object
+          properties:
+            identification: { type: string }
+            legalName: { type: string }
+            identificationType: { type: string, example: RUC, description: 'Tipo de identificación del proveedor (RUC, CEDULA, PASAPORTE…); lo piden los anexos del SRI' }
         docType: { type: string, example: '01' }
+        authorizationNumber: { type: string, nullable: true, description: 'Autorización del comprobante del proveedor (10 a 49 dígitos); lo pide el ATS de compras' }
+        paymentMethodCode: { type: string, nullable: true, description: 'SIEMPRE null hoy: compras no captura la forma de pago. El campo existe para que el ATS no cambie de contrato cuando se capture.' }
+        supportCode: { type: string, nullable: true, description: 'SIEMPRE null hoy: compras no captura el sustento tributario (tabla 5 del SRI). Igual que paymentMethodCode.' }
+        taxBreakdown:
+          type: array
+          description: 'Bases e IVA agrupados por tarifa (una fila por código de impuesto y porcentaje). Un `taxCode` vacío en la línea se toma como IVA (2). No distingue 0 %, no objeto y exento: caen en la fila de 0 %.'
+          items:
+            type: object
+            properties:
+              taxCode: { type: string, example: '2' }
+              ratePercent: { type: number, example: 15 }
+              baseCents: { type: integer }
+              amountCents: { type: integer }
         supplierDocument: { type: string, example: '001-001-000000123' }
         issueDate: { type: string, format: date }
         dueDate: { type: string, format: date }

@@ -271,11 +271,34 @@ export function billWithholdingIssuedEvent(
 
 /** Payload común para eventos de factura (D.5). */
 function billPayload(b: PurchaseBill): Record<string, unknown> {
+  // Agrupar por tarifa para el ATS/compras del SRI: solo se consideran los impuestos de IVA (taxCode '2' por defecto).
+  // Los ICE/IRBPNR van en sus propias columnas en el ATS; aquí solo se agrupa lo necesario para el resumen por tarifa.
+  const taxBreakdownMap = new Map<string, { taxCode: string; ratePercent: number; baseCents: number; amountCents: number }>();
+  for (const l of b.lines) {
+    const taxCode = l.taxCode ?? '2';
+    const ratePercent = Number(l.taxRatePct);
+    if (!Number.isFinite(ratePercent)) continue;
+    const key = `${taxCode}-${ratePercent}`;
+    const existing = taxBreakdownMap.get(key);
+    const baseCents = l.subtotalCents;
+    const amountCents = l.taxCents;
+    if (existing) {
+      existing.baseCents += baseCents;
+      existing.amountCents += amountCents;
+    } else {
+      taxBreakdownMap.set(key, { taxCode, ratePercent, baseCents, amountCents });
+    }
+  }
+
   return {
     billId: b.id,
     internalNumber: b.internalNumber,
     supplierId: b.supplierId,
-    supplier: { identification: b.supplier.identification, legalName: b.supplier.legalName },
+    supplier: {
+      identification: b.supplier.identification,
+      legalName: b.supplier.legalName,
+      identificationType: b.supplier.identificationType,
+    },
     docType: b.docType,
     supplierDocument: `${b.establishment}-${b.emissionPoint}-${b.sequential}`,
     issueDate: b.issueDate,
@@ -284,6 +307,11 @@ function billPayload(b: PurchaseBill): Record<string, unknown> {
     subtotalCents: b.subtotalCents,
     taxCents: b.taxCents,
     totalCents: b.totalCents,
+    // Datos necesarios para los anexos SRI
+    authorizationNumber: b.authorizationNumber,
+    paymentMethodCode: null,
+    supportCode: null,
+    taxBreakdown: taxBreakdownMap.size > 0 ? Array.from(taxBreakdownMap.values()) : [],
     establishmentId: null, // se puede añadir si se trae del proveedor
     orderId: b.purchaseOrderId,
     matchStatus: b.matchStatus,

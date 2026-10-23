@@ -342,6 +342,52 @@ describe('casos de uso de factura de compra', () => {
     expect(store.eventTypes()).toContain('purchasing.bill.posted');
   });
 
+  // El servicio de anexos del SRI (reporting-service) arma el ATS de compras con ESTOS campos del evento: si desaparecen o cambian de
+  // nombre, el anexo sale con datos vacíos sin que nada falle.
+  it('purchasing.bill.posted lleva lo que piden los anexos del SRI: autorización, tipo de identificación y bases por tarifa', async () => {
+    const s = await supplier();
+    const bill = await p.uc.createBill.execute({
+      organizationId: ORG_A,
+      userId: USER_1,
+      input: billInput(s.id, {
+        purchaseOrderId: null,
+        sequential: '000000555',
+        authorizationNumber: '1209202601179001234500120020030000045671234567815',
+        lines: [
+          billLine({ description: 'Papel gravado', unitCostCents: 250 }), // 10 × 2,50 = 25,00 con IVA 15 % = 3,75
+          billLine({ description: 'Libro tarifa 0', unitCostCents: 100, taxRatePct: '0.00' }), // 10 × 1,00 = 10,00 sin IVA
+          billLine({ description: 'Resma gravada', unitCostCents: 100 }), // 10 × 1,00 = 10,00 con IVA 15 % = 1,50
+        ],
+      }),
+    });
+    await p.uc.postBill.execute({ organizationId: ORG_A, billId: bill.id });
+
+    const posted = store.outboxEvents.filter((e) => e.type === 'purchasing.bill.posted');
+    expect(posted).toHaveLength(1);
+    const payload = posted[0]!.payload as {
+      authorizationNumber: string | null;
+      supplier: { identification: string; identificationType: string };
+      taxBreakdown: { taxCode: string; ratePercent: number; baseCents: number; amountCents: number }[];
+    };
+    expect(payload.authorizationNumber).toBe('1209202601179001234500120020030000045671234567815');
+    expect(payload.supplier).toMatchObject({ identificationType: 'RUC', identification: s.identification });
+    // Una fila por tarifa: las dos líneas al 15 % se suman, la de 0 % va aparte. Las bases y el IVA cuadran al centavo.
+    const byRate = Object.fromEntries(payload.taxBreakdown.map((t) => [t.ratePercent, t]));
+    expect(Object.keys(byRate).sort()).toEqual(['0', '15']);
+    expect(byRate[15]).toMatchObject({ baseCents: 35_00, amountCents: 5_25 });
+    expect(byRate[0]).toMatchObject({ baseCents: 10_00, amountCents: 0 });
+  });
+
+  it('purchasing.bill.posted no inventa lo que compras no captura: forma de pago y sustento tributario viajan en null', async () => {
+    const s = await supplier();
+    const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: null, sequential: '000000556' }) });
+    await p.uc.postBill.execute({ organizationId: ORG_A, billId: bill.id });
+    const payload = store.outboxEvents.find((e) => e.type === 'purchasing.bill.posted')!.payload as Record<string, unknown>;
+    expect(payload.paymentMethodCode).toBeNull();
+    expect(payload.supportCode).toBeNull();
+    expect(payload.authorizationNumber).toBeNull();
+  });
+
   it('contra una orden cuadrada, contabilizar deja posted y publica el evento', async () => {
     const { supplier: s, order, orderLineId } = await receivedOrder();
     const bill = await p.uc.createBill.execute({ organizationId: ORG_A, userId: USER_1, input: billInput(s.id, { purchaseOrderId: order.id, lines: [billLine({ orderLineId })] }) });
