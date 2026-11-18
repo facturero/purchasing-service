@@ -60,6 +60,102 @@ Publica (outbox → `crm.events`): `purchasing.supplier.upserted`; `purchasing.o
 
 **Retención y asiento:** la retención de una compra la emite fiscal-ecuador desde su pantalla (la factura la abre con los datos precargados); purchasing la consume por `fiscal.ec.withholding.issued` —busca la factura por RUC del proveedor y número del documento sustento— y la marca `withholdingStatus: issued`, publicando `purchasing.bill.withholding_issued`. No hay llamada HTTP de purchasing a fiscal (se quitó el emisor síncrono: usaba un contrato inventado). El asiento de la compra y el de la retención los consume `accounting-service`. **Destino de cada línea:** `kind` (`stock` | `expense`) lo decide el servidor con `trackStock` del catálogo de producto; accounting asienta a inventario solo las `stock`.
 
+## Sincronización con el portal del SRI
+
+Trae los comprobantes electrónicos **recibidos** desde `srienlinea.sri.gob.ec` (login con RUC/usuario y clave,
+menú «Comprobantes electrónicos recibidos»), los registra en `received_sri_documents` y **centraliza los XML**
+del portal (botón XML de cada fila, POST JSF con `javax.faces.ViewState` + cookies, el patrón del repo viejo
+`JordanNoah/sri-copy-invoice`). El portal solo sirve ~6 meses de XML por la vía del web service; de ahí la copia.
+
+- Credenciales por organización, cifradas con AES-256-GCM (`SRI_PORTAL_ENCRYPTION_KEY`), editables solo por
+  administradores; al guardarlas se prueba el login contra el portal. Los fallos de login se cuentan
+  (`login_fail_count`) y, al llegar a `SRI_PORTAL_MAX_LOGIN_ATTEMPTS`, se bloquea **solo esa organización**
+  (`blocked_by_sri=1`), no el resto. Un fallo de captcha **no** cuenta como fallo de credenciales.
+- Navegador: `puppeteer-real-browser` headful sobre Xvfb en el contenedor, **sin falsear el User-Agent**
+  (ver «La trampa del User-Agent»). Perfil de Chrome por RUC en `SRI_PORTAL_PROFILE_DIR`
+  (por defecto `/tmp/sri-portal-profiles`). Por defecto `SRI_PORTAL_PROFILE_MODE=fresh`: el perfil se borra al
+  empezar cada corrida, porque un perfil usado se degrada (ver «El captcha: el perfil de Chrome»). Con
+  `persistent` se conserva y solo se borra si la corrida falla.
+- **Cadencia (camino gratis, sin solver de pago):** el portal usa reCAPTCHA v2 Enterprise **invisible** y
+  castiga la repetición. Cada periodo gasta un captcha; por eso se sincroniza **de a un periodo por corrida**
+  (`SRI_PORTAL_PERIODS_PER_RUN`, por defecto 2), hacia atrás desde `sync_cursor_period`, se registra el avance
+  y un rechazo de captcha **detiene la corrida** (`last_status='captcha_pending'`) sin bloquear nada. Al
+  terminar la ventana (`SRI_PORTAL_SYNC_MONTHS`, por defecto 12) el cursor vuelve a `NULL` y empieza por el
+  mes actual. Funciona igual re-sincronizar: la importación no duplica (clave de acceso) y el XML ya guardado
+  no se pisa.
+- **No se pulsa «Descargar reporte»:** dispara una segunda consulta con captcha y duplica el riesgo. El TSV se
+  arma desde la tabla ya cargada (mismo layout de columnas que el repo viejo: 0 n.º, 1 RUC+razón social,
+  2 comprobante, 3 clave, 4 fecha autorización, 5 emisión, 6 subtotal, 7 IVA, 8 total, 9 XML, 10 PDF),
+  recorriendo el paginador `.ui-paginator-next`.
+- `CAPTCHA_SOLVER`: `manual` (defecto, usa el token del propio formulario), `2captcha` o `anticaptcha`
+  (`CAPTCHA_API_KEY`). Los dos últimos piden `RecaptchaV2 Enterprise` **invisible** con `action`
+  (`consulta_cel_recibidos`) y envían el token por `rcBuscar()` sin pulsar el botón (pulsarlo ejecuta el
+  reCAPTCHA otra vez y descarta el token resuelto). No están en uso en este despliegue.
+- `SRI_PORTAL_PROXY` (`http://usuario:clave@host:puerto`): proxy opcional del navegador. La IP de salida del
+  stack ya es **residencial ecuatoriana** (`157.100.127.107`, Telconet, Guayaquil; `hosting:false`,
+  `proxy:false`), así que esto no es para "parecer residencial" sino para **cambiar de IP** si la actual
+  quedó penalizada por la racha de captchas rechazados. `puppeteer-real-browser` arma `--proxy-server` y
+  autentica por `page.authenticate`.
+
+### La trampa del User-Agent
+
+Falsear el UA (un Chrome de Windows sobre el Chromium Linux del contenedor) hizo que reCAPTCHA Enterprise
+diera **todos** los tokens con riesgo alto: el portal respondía «Captcha incorrecta» siempre. Con el UA real
+del binario una consulta devolvió 28 comprobantes. La variable `SRI_PORTAL_USER_AGENT` queda **vacía** por
+defecto; solo se aplica si alguien la define para depurar. No se toca `navigator.platform` ni `Sec-CH-UA`.
+
+### La trampa del perfil persistente (ECONNREFUSED al relanzar)
+
+`puppeteer-real-browser` lanza Chrome con `--remote-debugging-port=0` y saca el puerto real de
+`chrome-err.log` (por `chrome-launcher`), pero **se queda con la PRIMERA línea «DevTools listening on …»**.
+Como el perfil es persistente, ese log ya traía el puerto de la corrida anterior —muerto—, así que `connect()`
+fallaba con `ECONNREFUSED` contra un puerto que nadie escuchaba y dejaba un Chrome huérfano reteniendo el
+perfil. Se descubrió con un `chrome-err.log` que anunciaba **dos** puertos (el viejo y el nuevo) y el error
+apuntando al viejo. `prepareProfile()` ahora borra `chrome-err.log`, `chrome-out.log`, `chrome.pid`,
+`DevToolsActivePort` y los `Singleton*` antes de arrancar, y solo tras matar el proceso principal huérfano.
+Ojo al matar: el binario se llama `google-chrome-stable`, no `chrome`, así que el filtro del nombre debe
+aceptarlo (o no mata nada).
+
+### El captcha: el perfil de Chrome (2026-11-18)
+
+Síntoma: el portal respondía «Captcha incorrecta» **siempre**, con un token Enterprise válido (`0cAFcWeA…`,
+~2.4 kB) en el campo `g-recaptcha-response`. Se descartó el flujo: llamar a
+`executeRecaptcha('consulta_cel_recibidos','SI')` del propio portal, sin pulsar el botón y sin el POST previo
+de `btnBuscar` con token vacío, también se rechaza; el `sitekey` del widget es el mismo del script
+(`enterprise.js?render=…`); y un token con `sitekey` y `action` explícitos, inyectado y enviado por `rcBuscar()`,
+también. O sea: no era el código.
+
+Causa: **el perfil de Chrome acumula estado que lo deja inservible**. Un perfil usado durante horas (el del 16,
+117 MB) falla de forma permanente para *ese* perfil —a veces en el captcha, a veces antes, al no poder navegar a
+«recibidos»—, mientras que con la **misma IP, la misma cuenta y el mismo código** un perfil recién creado pasa.
+El 18 se vio además que un perfil que había pasado **3 corridas seguidas** a las 09:37 ya fallaba a las 10:07, y
+**borrarle solo las cookies no lo revivió**: no es la sesión, es el perfil entero. Con una cadencia horaria eso
+significa que un perfil de la corrida anterior suele llegar ya degradado.
+
+Se descartó la IP como causa: la salida ya es **residencial ecuatoriana** (`157.100.127.107`, Telconet,
+Guayaquil; `hosting:false`, `proxy:false`), y con ella un Chrome nativo de Windows (con y sin `--disable-gpu`)
+pasó el captcha 3/3, y perfiles nuevos del contenedor pasaron **todas** las consultas de la mañana. No hace
+falta proxy residencial; `SRI_PORTAL_PROXY` queda por si algún día hay que **cambiar** de IP, no para "parecer
+residencial".
+
+Solución, en tres capas:
+
+1. `SRI_PORTAL_PROFILE_MODE=fresh` (defecto): el perfil del RUC se **borra al empezar cada corrida**
+   (`wipePortalProfile`), así que cada corrida arranca limpia. Es lo que se midió como fiable.
+2. `SRI_PORTAL_PROFILE_MODE=persistent`: se conserva el perfil y solo se borra **cuando una corrida falla**
+   (captcha o error de navegación; **no** en un fallo de credenciales). Se borra **después** de cerrar el
+   navegador, que es quien retiene el perfil.
+3. **Reintento en la misma corrida:** si una pasada falla *sin haber hecho ningún periodo*, se borra el perfil y
+   se intenta una segunda vez con perfil limpio (5 s de espera). Si ya se hizo algún periodo el cursor avanzó y
+   no se reintenta —el portal castiga la repetición y no tiene sentido rehacer lo hecho—; la hora siguiente sigue
+   sola. Un fallo de credenciales no se reintenta.
+
+Verificado de punta a punta con el servicio real (modo `fresh`): corrida sobre el perfil envenenado →
+`error ... No se pudo navegar a recibidos` + «perfil del portal borrado»; corrida siguiente limpia → 2026-11
+(12 filas, 4 nuevas) y 2026-10 (28 filas), `last_status=ok`, `sync_cursor_period` avanzando (2026-09 → … →
+2026-05). Y dos sesiones limpias seguidas (perfil nuevo cada una) pasaron las dos. La corrida que falla no
+avanza el cursor ni bloquea la organización; con el reintento (3) se recupera en la misma corrida.
+
 ## Verificación
 
 - `scripts/check-openapi-routes.mjs` (`npm run verify:openapi`) coteja `openapi.yaml` con las rutas realmente montadas en `src/interface/http/routes.ts`, en las dos direcciones, sin dependencias nuevas. Corre en CI tras las pruebas. Sin este cotejo el contrato ya se desincronizó una vez (faltaba el `PUT /purchasing/bills/{id}`, además del `notes` y los métodos de la factura): el contrato se escribe a mano y nadie lo cruzaba con las rutas.
@@ -67,11 +163,27 @@ Publica (outbox → `crm.events`): `purchasing.supplier.upserted`; `purchasing.o
 - `scripts/verify-receiving-billing.mjs` contra **MySQL real, RabbitMQ y los catálogos reales** del stack Docker: cantidad recibida en el evento, delta de stock en inventario, totales de la recepción contabilizada, **rechazo de la sobre-recepción**, dos recepciones simultáneas (no se pasa del límite), conciliación de la factura, asiento contable y eventos en la bitácora. Este script **sustituye** a los antiguos `verify-receiving.mjs` y `verify-bills.mjs`.
 - `scripts/verify-purchasing.mjs` (Fase 2.1) contra **MySQL real y los catálogos reales**: orden con importes exactos, aprobación con otra persona, dos aprobaciones simultáneas (una gana, otra 409), 30 envíos simultáneos con números seguidos, 4 ediciones simultáneas, cancelación con permisos, aislamiento entre organizaciones, listado con filtros.
 - En el navegador (CRM completo por el gateway): proveedores, nueva orden con producto buscado en el servidor, totales idénticos a los del servidor, envío y detalle; seguimiento por línea, recepción y factura con su panel de conciliación.
+- **Portal SRI (local, 2026-11-16 y 2026-11-18):** login real con las credenciales guardadas, navegación a
+  «Comprobantes electrónicos recibidos» y consultas con su botón XML por fila. El 16 se importaron **384
+  comprobantes** (2025-12 a 2026-11) con su XML. El 18, con el modo `fresh`, el servicio real encadenó corridas
+  limpias: 2026-11 (12 filas, 4 nuevas), 2026-10 (28), 2026-09 (32), 2026-08 (39), 2026-07 (32) y 2026-06 (28),
+  importando, adjuntando los XML, marcando `last_status=ok` y avanzando el cursor mes a mes. Una corrida que
+  falla sin hacer ningún periodo borra el perfil y **reintenta en la misma corrida** con perfil limpio; antes de
+  ese reintento la recuperación era en la corrida siguiente (hasta 1 h después). La importación y el adjuntado
+  también están cubiertos por `received-documents.test.ts` y `sri-report.test.ts`.
 - `seed/steps/purchasing.ts` (semilla, por la API del gateway) siembra proveedor → orden aprobada → recepción parcial → factura contabilizada, y es idempotente: de la segunda corrida en adelante salta cada etapa.
 
 ## Límites conocidos / siguiente
 
 - **Sin autorización para subir:** la retención en la compra y los asientos de compra/retención (construidos y probados, se quedan en el árbol hasta que el dueño diga).
+- **Portal SRI + captcha:** el captcha no depende del código ni del `sitekey`; el problema era el **perfil de
+  Chrome**, que se degrada con el uso y desde el 2026-11-18 se recrea limpio en cada corrida por defecto (ver
+  «El captcha: el perfil de Chrome»). Aun así el portal castiga la repetición: conviene un periodo por corrida y
+  el cron reintenta cada hora sin perder el cursor ni bloquear la organización. Para producción falta: (a) crear
+  el Secret con `SRI_PORTAL_ENCRYPTION_KEY` (hoy el valor por defecto es de desarrollo) y referenciarlo en
+  `k8s/deployment.yaml`; (b) decidir el `SRI_PORTAL_PROFILE_DIR` (con el modo `fresh` por defecto no hace falta
+  volumen: el perfil se recrea en cada corrida y en el pod es efímero); (c) decidir si se contrata
+  `CAPTCHA_SOLVER=2captcha|anticaptcha` para que sea más fiable.
 - **Sin liquidación de compra (03):** falta el XSD oficial del SRI; sin él no se valida el XML y no se inventa.
 - **`notes` de la factura y el permiso `purchase_bill:create_unmatched`: arreglados en local el 2026-10-19, sin subir**
   (migración `20261020120000-add-purchase-bill-notes.cjs` **sin aplicar**): van con el próximo push.

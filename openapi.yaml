@@ -18,6 +18,7 @@ tags:
   - name: Recepción de mercadería
   - name: Facturas de compra
   - name: Política de aprobación
+  - name: Comprobantes recibidos del SRI
 security:
   - gatewayHeaders: []
 paths:
@@ -396,6 +397,152 @@ paths:
                 qtyToleranceBp: { type: integer, minimum: 0, maximum: 5000 }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Settings' } } } }
+  /purchasing/received-documents:
+    get:
+      tags: [Comprobantes recibidos del SRI]
+      summary: Lista paginada de comprobantes que el SRI registra a nombre de la organización
+      description: 'Permiso: `purchase_bill:read`. No incluye el XML (se pide aparte). Ordena por fecha de emisión, del más reciente al más viejo.'
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: 'Razón social, RUC, número o clave de acceso' }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/ReceivedDocumentStatus' } }
+        - { name: issuerRuc, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReceivedDocumentPage' } } } }
+  /purchasing/received-documents/status:
+    get:
+      tags: [Comprobantes recibidos del SRI]
+      summary: ¿Estoy al día? Cuántos hay por estado y hasta qué fecha de emisión se tiene
+      description: 'Permiso: `purchase_bill:read`. `latestIssueDate` es «el último bajado»: desde ahí sigue la sincronización.'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  counts: { type: object, additionalProperties: { type: integer } }
+                  latestIssueDate: { type: string, format: date, nullable: true }
+  /purchasing/received-documents/import:
+    post:
+      tags: [Comprobantes recibidos del SRI]
+      summary: Registra las claves de un reporte «Descargar reporte» del portal del SRI
+      description: >-
+        Permiso: `purchase_bill:create`. No baja nada: cada clave nueva queda `pending` (o `needs_portal` si su fecha de emisión es
+        más vieja que lo que contesta el web service del SRI, unos 6 meses) y el trabajo programado trae los XML. Las claves que
+        ya estaban se cuentan como `duplicates`: reimportar el mismo reporte no repite nada. Una fila inválida se informa en
+        `rejected` y no tumba las demás. El texto debe llegar decodificado (el SRI lo sirve en ISO-8859-1).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [report]
+              properties:
+                report: { type: string, description: 'Contenido del .txt tal cual: cabecera y filas con tabuladores' }
+      responses:
+        '201':
+          description: Importado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batchId: { type: string, format: uuid }
+                  total: { type: integer }
+                  created: { type: integer }
+                  duplicates: { type: integer }
+                  needsPortal: { type: integer }
+                  rejected:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        line: { type: integer }
+                        reason: { type: string }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /purchasing/received-documents/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Comprobantes recibidos del SRI]
+      summary: Un comprobante recibido (sin el XML)
+      description: 'Permiso: `purchase_bill:read`.'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReceivedDocument' } } } }
+        '404': { description: No existe (o es de otra organización) }
+  /purchasing/received-documents/{id}/xml:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Comprobantes recibidos del SRI]
+      summary: Descarga el XML autorizado
+      description: 'Permiso: `purchase_bill:read`. 404 mientras el comprobante no tenga XML.'
+      responses:
+        '200': { description: El XML autorizado, content: { application/xml: { schema: { type: string } } } }
+        '404': { description: No existe, o todavía no tiene XML }
+    put:
+      tags: [Comprobantes recibidos del SRI]
+      summary: Guarda a mano el XML autorizado (lo que el web service ya no contesta)
+      description: >-
+        Permiso: `purchase_bill:create`. El cuerpo es el XML tal cual, no JSON. Debe citar la clave de acceso del comprobante y, si
+        trae sobre de autorización, estar `AUTORIZADO` (422 si no). Si ya había un XML guardado no se pisa: es el comprobante legal.
+      requestBody:
+        required: true
+        content: { application/xml: { schema: { type: string } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReceivedDocument' } } } }
+        '404': { description: No existe (o es de otra organización) }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /purchasing/sri-portal/config:
+    get:
+      tags: [Portal del SRI]
+      summary: Estado de la sincronización con el portal del SRI de la organización
+      description: >-
+        Basta con un usuario autenticado (no exige permiso). Nunca devuelve la contraseña: solo `hasPassword`. Si la organización no
+        configuró nada aún, responde los valores por defecto (sin usuario, desactivada).
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SriPortalConfig' } } } }
+  /purchasing/sri-portal/credentials:
+    post:
+      tags: [Portal del SRI]
+      summary: Prueba el inicio de sesión en el portal del SRI y, si funciona, guarda las credenciales cifradas
+      description: >-
+        Basta con un usuario autenticado. Cada intento fallido cuenta: al llegar al máximo (`maxAttempts`) la sincronización queda
+        bloqueada para no bloquear la cuenta en el SRI, y solo se desbloquea guardando credenciales correctas.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, description: RUC o cédula con que se entra al portal }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Login correcto y credenciales guardadas, content: { application/json: { schema: { $ref: '#/components/schemas/SriPortalOk' } } } }
+        '400': { description: '`SRI_PORTAL_BAD_CREDENTIALS`: usuario o contraseña incorrectos (el mensaje dice cuántos intentos quedan)' }
+        '403': { description: '`SRI_PORTAL_BLOCKED`: se alcanzó el límite de intentos; la sincronización quedó bloqueada' }
+  /purchasing/sri-portal/enable:
+    post:
+      tags: [Portal del SRI]
+      summary: Activa la sincronización periódica con el portal
+      description: Basta con un usuario autenticado. Exige credenciales guardadas y que la sincronización no esté bloqueada.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SriPortalEnabled' } } } }
+        '400': { description: '`SRI_PORTAL_NOT_CONFIGURED`: falta usuario o contraseña' }
+        '403': { description: '`SRI_PORTAL_BLOCKED`: bloqueada por intentos fallidos' }
+  /purchasing/sri-portal/disable:
+    post:
+      tags: [Portal del SRI]
+      summary: Desactiva la sincronización periódica con el portal
+      description: Basta con un usuario autenticado. Conserva las credenciales guardadas.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/SriPortalEnabled' } } } }
 components:
   securitySchemes:
     gatewayHeaders:
@@ -419,6 +566,69 @@ components:
                 type: array
                 items: { type: object, properties: { field: { type: string }, message: { type: string } } }
   schemas:
+    SriPortalConfig:
+      type: object
+      properties:
+        organizationId: { type: string, format: uuid }
+        username: { type: string, nullable: true }
+        hasPassword: { type: boolean }
+        enabled: { type: boolean, description: 'Falso también si está bloqueada' }
+        lastRunAt: { type: string, format: date-time, nullable: true }
+        lastStatus: { type: string, nullable: true }
+        lastError: { type: string, nullable: true }
+        updatedAt: { type: string, format: date-time }
+        loginFailCount: { type: integer }
+        maxAttempts: { type: integer }
+        attemptsLeft: { type: integer }
+        blockedBySri: { type: boolean }
+        blockedReason: { type: string, nullable: true }
+        lastLoginTestOk: { type: boolean, nullable: true }
+    SriPortalOk:
+      type: object
+      properties:
+        ok: { type: boolean }
+    SriPortalEnabled:
+      type: object
+      properties:
+        ok: { type: boolean }
+        enabled: { type: boolean }
+    ReceivedDocumentStatus:
+      type: string
+      enum: [pending, needs_portal, downloaded, not_authorized, failed]
+      description: >-
+        `pending`: falta traer el XML. `needs_portal`: es más viejo que lo que contesta el web service del SRI; el XML solo sale del
+        portal o de una carga manual. `downloaded`: el XML ya está guardado. `not_authorized`: el SRI no lo autoriza. `failed`: se
+        agotaron los reintentos.
+    ReceivedDocument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        accessKey: { type: string, description: 'Clave de acceso de 49 dígitos' }
+        documentTypeCode: { type: string, description: '01 factura, 03 liquidación de compra, 04 nota de crédito, 05 nota de débito, 06 guía de remisión, 07 retención' }
+        issuerRuc: { type: string }
+        issuerName: { type: string }
+        documentNumber: { type: string, example: 001-002-000000123 }
+        issueDate: { type: string, format: date }
+        authorizedAt: { type: string, format: date-time, nullable: true }
+        subtotalCents: { type: integer }
+        taxCents: { type: integer }
+        totalCents: { type: integer }
+        modifiedDocumentNumber: { type: string, nullable: true, description: 'En notas de crédito y débito, el documento que modifican' }
+        status: { $ref: '#/components/schemas/ReceivedDocumentStatus' }
+        source: { type: string, enum: [portal_report, manual] }
+        attempts: { type: integer }
+        lastError: { type: string, nullable: true }
+        nextAttemptAt: { type: string, format: date-time, nullable: true }
+        downloadedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ReceivedDocumentPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ReceivedDocument' } }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
     OrderStatus:
       type: string
       enum: [draft, pending_approval, approved, partially_received, received, closed, cancelled, rejected]

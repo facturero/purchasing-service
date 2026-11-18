@@ -5,6 +5,7 @@ import { ORDER_STATUSES } from '../../domain/purchase-order.js';
 import { BILL_STATUSES, SUPPLIER_DOC_TYPES, type BillLineInput, type BillStatus } from '../../domain/purchase-bill.js';
 import { parseQuantity } from '../../domain/money.js';
 import { ValidationError } from '../../domain/errors.js';
+import { RECEIVED_STATUSES, type ReceivedDocumentStatus } from '../../domain/received-document.js';
 
 const UUID = z.string().uuid('El identificador no es válido.');
 const LOCAL_DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe tener el formato AAAA-MM-DD.');
@@ -202,3 +203,16 @@ export function validateQuery<T extends ZodSchema>(schema: T) {
     }
   });
 }
+
+/** El reporte del portal como texto (ya decodificado). Hasta ~5000 filas de ~250 caracteres; más que eso no es un reporte mensual. */
+export const importReportSchema = z.object({ report: z.string().min(1, 'El reporte está vacío.').max(2_000_000, 'El reporte es demasiado grande; divídelo por mes.') }).strict();
+
+export const receivedDocumentQuerySchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  status: z.enum(RECEIVED_STATUSES as unknown as [ReceivedDocumentStatus, ...ReceivedDocumentStatus[]]).optional(),
+  issuerRuc: z.string().trim().regex(/^\d{10,13}$/, 'El RUC del emisor son 10 a 13 dígitos.').optional(),
+  from: LOCAL_DATE.optional(),
+  to: LOCAL_DATE.optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+});

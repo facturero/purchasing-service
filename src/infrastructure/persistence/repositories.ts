@@ -1,6 +1,7 @@
 import { Op, QueryTypes, Transaction, type WhereOptions } from 'sequelize';
 import { withActor } from '@facturero/outbox-relay';
 import { sequelize } from './sequelize.js';
+import { receivedDocumentRepository } from './received-document-repository.js';
 import { GoodsReceiptLineModel, GoodsReceiptModel, OrderLineModel, OrderModel, OutboxModel, PurchaseBillLineModel, PurchaseBillModel, SettingsModel, SupplierModel } from './models.js';
 import type { WriteUnitOfWork } from '../../application/ports.js';
 import { ConcurrentUpdateError } from '../../domain/errors.js';
@@ -716,6 +717,7 @@ export function buildRepositories(tx?: Transaction): UnitOfWork {
     receipts: receiptRepository(tx),
     bills: billRepository(tx),
     settings: settingsRepository(tx),
+    receivedDocuments: receivedDocumentRepository(tx),
     outbox: outboxRepository(tx),
   };
 }
@@ -728,6 +730,7 @@ export class SequelizeUnitOfWork implements WriteUnitOfWork {
   readonly receipts;
   readonly bills;
   readonly settings;
+  readonly receivedDocuments;
   readonly outbox;
 
   constructor(readonly tx: Transaction) {
@@ -737,6 +740,7 @@ export class SequelizeUnitOfWork implements WriteUnitOfWork {
     this.receipts = repos.receipts;
     this.bills = repos.bills;
     this.settings = repos.settings;
+    this.receivedDocuments = repos.receivedDocuments;
     this.outbox = repos.outbox;
   }
 

@@ -252,6 +252,55 @@ channels:
                   quantity: { type: string }
                   unitCostCents: { type: integer }
                   currencyCode: { type: string }
+  purchasing.sri_document.imported:
+    publish:
+      summary: Se registraron claves de un reporte del portal del SRI (un evento por lote, no por documento)
+      message:
+        payload:
+          type: object
+          properties:
+            organizationId: { type: string, format: uuid }
+            source: { type: string, enum: [portal_report] }
+            total: { type: integer }
+            created: { type: integer }
+            duplicates: { type: integer }
+            rejected: { type: integer }
+            needsPortal: { type: integer, description: Las nuevas que son más viejas que lo que contesta el web service }
+            createdBy: { type: string, format: uuid }
+  purchasing.sri_document.downloaded:
+    publish:
+      summary: Ya está guardado el XML autorizado de un comprobante recibido
+      message:
+        payload:
+          type: object
+          properties:
+            organizationId: { type: string, format: uuid }
+            documentId: { type: string, format: uuid }
+            accessKey: { type: string }
+            documentTypeCode: { type: string }
+            issuerRuc: { type: string }
+            documentNumber: { type: string }
+            issueDate: { type: string, format: date }
+            totalCents: { type: integer }
+            status: { type: string, enum: [downloaded] }
+            via: { type: string, enum: [web_service, manual] }
+  purchasing.sri_document.unavailable:
+    publish:
+      summary: Un comprobante dejó de intentarse sin XML (no autorizado, más viejo que el web service, o reintentos agotados)
+      message:
+        payload:
+          type: object
+          properties:
+            organizationId: { type: string, format: uuid }
+            documentId: { type: string, format: uuid }
+            accessKey: { type: string }
+            documentTypeCode: { type: string }
+            issuerRuc: { type: string }
+            documentNumber: { type: string }
+            issueDate: { type: string, format: date }
+            totalCents: { type: integer }
+            status: { type: string, enum: [needs_portal, not_authorized, failed] }
+            reason: { type: string, nullable: true }
 components:
   messages:
     Order:

@@ -1,6 +1,7 @@
 import type { OrderStatus, PurchaseOrder } from './purchase-order.js';
 import type { BillLine, BillStatus, MatchStatus, PurchaseBill, SupplierDocType } from './purchase-bill.js';
 import type { Supplier, SupplierStatus } from './supplier.js';
+import type { ReceivedDocumentStatus, ReceivedSriDocument } from './received-document.js';
 
 export interface DomainEvent {
   eventId: string;
@@ -170,6 +171,36 @@ export interface SettingsRepository {
   save(settings: PurchasingSettings): Promise<void>;
 }
 
+export interface ReceivedDocumentFilters {
+  status?: ReceivedDocumentStatus;
+  issuerRuc?: string;
+  /** Fecha de emisión, `AAAA-MM-DD`. */
+  from?: string;
+  to?: string;
+  /** Busca en la razón social, el número y la clave de acceso. */
+  q?: string;
+  page: number;
+  pageSize: number;
+}
+
+export interface ReceivedDocumentRepository {
+  findById(organizationId: string, id: string, options?: { lock?: boolean }): Promise<ReceivedSriDocument | null>;
+  findByAccessKey(organizationId: string, accessKey: string, options?: { lock?: boolean }): Promise<ReceivedSriDocument | null>;
+  /** De estas claves, las que la organización ya tiene: la base del «no repetir lo ya bajado». */
+  findExistingKeys(organizationId: string, accessKeys: string[]): Promise<Set<string>>;
+  list(organizationId: string, filters: ReceivedDocumentFilters): Promise<Page<ReceivedSriDocument>>;
+  /** Los pendientes cuyo próximo intento ya llegó, de TODAS las organizaciones (lo usa el trabajo programado, no una petición). */
+  listDue(now: Date, limit: number): Promise<ReceivedSriDocument[]>;
+  /** Cuántos hay por estado: lo que la pantalla muestra como «al día» o «faltan N». */
+  countByStatus(organizationId: string): Promise<Record<ReceivedDocumentStatus, number>>;
+  /** Fecha de emisión más reciente que ya se tiene: «el último bajado», para saber desde dónde seguir. */
+  latestIssueDate(organizationId: string): Promise<string | null>;
+  /** Alta de varios; una clave repetida (carrera entre dos importaciones) se ignora, no tumba el lote. */
+  insertMany(documents: ReceivedSriDocument[]): Promise<void>;
+  /** Cambio por clave primaria. */
+  save(document: ReceivedSriDocument): Promise<void>;
+}
+
 export interface OutboxRepository {
   add(event: DomainEvent): Promise<void>;
 }
@@ -180,5 +211,6 @@ export interface UnitOfWork {
   receipts: ReceiptRepository;
   bills: BillRepository;
   settings: SettingsRepository;
+  receivedDocuments: ReceivedDocumentRepository;
   outbox: OutboxRepository;
 }

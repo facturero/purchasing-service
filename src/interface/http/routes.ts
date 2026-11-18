@@ -33,11 +33,22 @@ import type {
   VoidBillUseCase,
 } from '../../application/use-cases/bill-use-cases.js';
 import type { GetSettingsUseCase, UpdateSettingsUseCase } from '../../application/use-cases/settings-use-cases.js';
+import type {
+  AttachReceivedXmlUseCase,
+  FetchReceivedDocumentsUseCase,
+  GetReceivedDocumentsStatusUseCase,
+  GetReceivedDocumentUseCase,
+  ImportSriReportUseCase,
+  ListReceivedDocumentsUseCase,
+} from '../../application/use-cases/received-document-use-cases.js';
 import type { OrderStatus } from '../../domain/purchase-order.js';
 import { assertCanBillWithoutOrder, type ContextVariables, requireOrganization, requirePermission, requireUser } from './middlewares.js';
+import type { SriPortalController } from './sri-portal-controller.js';
 import {
   billQuerySchema,
   billSchema,
+  importReportSchema,
+  receivedDocumentQuerySchema,
   orderQuerySchema,
   orderSchema,
   overrideSchema,
@@ -52,7 +63,7 @@ import {
   validateQuery,
   voidSchema,
 } from './validators.js';
-import { toBillJSON, toOrderJSON, toReceiptJSON, toSettingsJSON, toSupplierJSON } from './serializers.js';
+import { toBillJSON, toOrderJSON, toReceiptJSON, toReceivedDocumentJSON, toSettingsJSON, toSupplierJSON } from './serializers.js';
 
 type Vars = { Variables: ContextVariables };
 type Ctx = Context<Vars>;
@@ -78,6 +89,12 @@ export interface AppDependencies {
     postBill: PostBillUseCase;
     overrideBill: OverrideBillUseCase;
     voidBill: VoidBillUseCase;
+    importSriReport: ImportSriReportUseCase;
+    fetchReceivedDocuments: FetchReceivedDocumentsUseCase;
+    attachReceivedXml: AttachReceivedXmlUseCase;
+    listReceivedDocuments: ListReceivedDocumentsUseCase;
+    getReceivedDocument: GetReceivedDocumentUseCase;
+    getReceivedDocumentsStatus: GetReceivedDocumentsStatusUseCase;
     createOrder: CreateOrderUseCase;
     updateOrder: UpdateOrderUseCase;
     submitOrder: SubmitOrderUseCase;
@@ -88,6 +105,7 @@ export interface AppDependencies {
     receiveOrder: ReceiveOrderUseCase;
     closeOrder: CloseOrderUseCase;
   };
+  sriPortal?: SriPortalController;
   corsOrigin: string;
 }
 
@@ -261,6 +279,43 @@ export function purchasingRoutes(deps: AppDependencies): Hono<Vars> {
     const bill = await uc.voidBill.execute({ organizationId: org(c), billId: c.req.param('id'), userId: user(c), reason: input.reason });
     return c.json(toBillJSON(bill));
   });
+
+  // ── Comprobantes recibidos del SRI ──────────────────────────────────────────
+  // Leer es `purchase_bill:read`; registrar claves o subir un XML es `purchase_bill:create` (es preparar facturas de compra).
+  r.get('/purchasing/received-documents/status', ...base, requirePermission('purchase_bill:read'), async (c) =>
+    c.json(await uc.getReceivedDocumentsStatus.execute({ organizationId: org(c) })));
+
+  r.get('/purchasing/received-documents', ...base, requirePermission('purchase_bill:read'), validateQuery(receivedDocumentQuerySchema), async (c) => {
+    const filters = c.req.valid('query' as never) as z.infer<typeof receivedDocumentQuerySchema>;
+    const page = await uc.listReceivedDocuments.execute({ organizationId: org(c), filters });
+    return c.json({ ...page, items: page.items.map(toReceivedDocumentJSON) });
+  });
+
+  r.post('/purchasing/received-documents/import', ...base, requireUser(), requirePermission('purchase_bill:create'), validateJson(importReportSchema), async (c) => {
+    const input = c.req.valid('json' as never) as z.infer<typeof importReportSchema>;
+    return c.json(await uc.importSriReport.execute({ organizationId: org(c), userId: user(c), text: input.report }), 201);
+  });
+
+  r.get('/purchasing/received-documents/:id', ...base, requirePermission('purchase_bill:read'), async (c) =>
+    c.json(toReceivedDocumentJSON(await uc.getReceivedDocument.execute({ organizationId: org(c), documentId: c.req.param('id') }))));
+
+  r.get('/purchasing/received-documents/:id/xml', ...base, requirePermission('purchase_bill:read'), async (c) => {
+    const doc = await uc.getReceivedDocument.execute({ organizationId: org(c), documentId: c.req.param('id') });
+    if (!doc.xml) return c.json({ code: 'XML_NOT_AVAILABLE', message: 'Este comprobante todavía no tiene XML.' }, 404);
+    return c.body(doc.xml, 200, { 'Content-Type': 'application/xml; charset=utf-8', 'Content-Disposition': `attachment; filename="${doc.accessKey}.xml"` });
+  });
+
+  /** El cuerpo es el XML tal cual (no JSON): así lo manda un recolector o una persona que arrastra el archivo. */
+  r.put('/purchasing/received-documents/:id/xml', ...base, requireUser(), requirePermission('purchase_bill:create'), async (c) =>
+    c.json(toReceivedDocumentJSON(await uc.attachReceivedXml.execute({ organizationId: org(c), documentId: c.req.param('id'), xml: await c.req.text() }))));
+
+  // ── Sincronización portal SRI ───────────────────────────────────────────────
+  if (deps.sriPortal) {
+    r.get('/purchasing/sri-portal/config', ...base, requireUser(), (c: any) => deps.sriPortal!.getConfigHandler(c));
+    r.post('/purchasing/sri-portal/credentials', ...base, requireUser(), (c: any) => deps.sriPortal!.saveCredentials(c));
+    r.post('/purchasing/sri-portal/enable', ...base, requireUser(), (c: any) => deps.sriPortal!.enable(c));
+    r.post('/purchasing/sri-portal/disable', ...base, requireUser(), (c: any) => deps.sriPortal!.disable(c));
+  }
 
   return r;
 }

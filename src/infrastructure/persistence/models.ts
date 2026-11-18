@@ -373,3 +373,60 @@ OutboxModel.init(
   },
   { sequelize, tableName: 'outbox_messages', timestamps: false },
 );
+
+export class ReceivedDocumentModel extends Model<InferAttributes<ReceivedDocumentModel>, InferCreationAttributes<ReceivedDocumentModel>> {
+  declare id: string;
+  declare organization_id: string;
+  declare access_key: string;
+  declare document_type_code: string;
+  declare issuer_ruc: string;
+  declare issuer_name: string;
+  declare document_number: string;
+  declare issue_date: string;
+  declare authorized_at: Date | null;
+  declare subtotal_cents: string | number;
+  declare tax_cents: string | number;
+  declare total_cents: string | number;
+  declare modified_document_number: string | null;
+  declare status: string;
+  declare source: string;
+  declare xml: string | null;
+  declare attempts: number;
+  declare last_error: string | null;
+  declare last_attempt_at: Date | null;
+  declare next_attempt_at: Date | null;
+  declare downloaded_at: Date | null;
+  declare created_by: string;
+  declare created_at: Date;
+  declare updated_at: Date;
+}
+
+ReceivedDocumentModel.init(
+  {
+    id: { type: DataTypes.CHAR(36), primaryKey: true },
+    organization_id: { type: DataTypes.CHAR(36), allowNull: false },
+    access_key: { type: DataTypes.CHAR(49), allowNull: false },
+    document_type_code: { type: DataTypes.CHAR(2), allowNull: false },
+    issuer_ruc: { type: DataTypes.STRING(13), allowNull: false },
+    issuer_name: { type: DataTypes.STRING(300), allowNull: false, defaultValue: '' },
+    document_number: { type: DataTypes.STRING(20), allowNull: false },
+    issue_date: { type: DataTypes.DATEONLY, allowNull: false },
+    authorized_at: { type: DataTypes.DATE, allowNull: true },
+    subtotal_cents: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0 },
+    tax_cents: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0 },
+    total_cents: { type: DataTypes.BIGINT, allowNull: false, defaultValue: 0 },
+    modified_document_number: { type: DataTypes.STRING(20), allowNull: true },
+    status: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'pending' },
+    source: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'portal_report' },
+    xml: { type: DataTypes.TEXT('long'), allowNull: true },
+    attempts: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    last_error: { type: DataTypes.STRING(500), allowNull: true },
+    last_attempt_at: { type: DataTypes.DATE, allowNull: true },
+    next_attempt_at: { type: DataTypes.DATE, allowNull: true },
+    downloaded_at: { type: DataTypes.DATE, allowNull: true },
+    created_by: { type: DataTypes.CHAR(36), allowNull: false },
+    created_at: { type: DataTypes.DATE, allowNull: false },
+    updated_at: { type: DataTypes.DATE, allowNull: false },
+  },
+  { sequelize, tableName: 'received_sri_documents', timestamps: false },
+);

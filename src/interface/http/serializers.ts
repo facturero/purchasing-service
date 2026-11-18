@@ -4,6 +4,7 @@ import type { BillLine, PurchaseBill } from '../../domain/purchase-bill.js';
 import type { OrderLine, PurchaseOrder } from '../../domain/purchase-order.js';
 import type { PurchasingSettings } from '../../domain/repositories.js';
 import type { Supplier } from '../../domain/supplier.js';
+import type { ReceivedSriDocument } from '../../domain/received-document.js';
 
 export const toSupplierJSON = (s: Supplier) => ({
   id: s.id,
@@ -163,4 +164,28 @@ export const toBillJSON = (b: PurchaseBill, options: { withLines?: boolean } = {
   createdAt: b.createdAt.toISOString(),
   updatedAt: b.updatedAt.toISOString(),
   version: b.version,
+});
+
+/** Sin el XML (pesa decenas de KB por fila): se pide aparte en `/purchasing/received-documents/{id}/xml`. */
+export const toReceivedDocumentJSON = (d: ReceivedSriDocument) => ({
+  id: d.id,
+  accessKey: d.accessKey,
+  documentTypeCode: d.documentTypeCode,
+  issuerRuc: d.issuerRuc,
+  issuerName: d.issuerName,
+  documentNumber: d.documentNumber,
+  issueDate: d.issueDate,
+  authorizedAt: d.authorizedAt?.toISOString() ?? null,
+  subtotalCents: d.subtotalCents,
+  taxCents: d.taxCents,
+  totalCents: d.totalCents,
+  modifiedDocumentNumber: d.modifiedDocumentNumber,
+  status: d.status,
+  source: d.source,
+  attempts: d.attempts,
+  lastError: d.lastError,
+  nextAttemptAt: d.nextAttemptAt?.toISOString() ?? null,
+  downloadedAt: d.downloadedAt?.toISOString() ?? null,
+  createdAt: d.createdAt.toISOString(),
+  updatedAt: d.updatedAt.toISOString(),
 });

@@ -231,3 +231,24 @@ export class WithholdingAlreadyIssuedError extends AppError {
   readonly httpStatus = 409;
   constructor(message = 'Esta factura ya tiene una retención emitida.') { super(message); }
 }
+
+// ── Comprobantes recibidos del SRI ──────────────────────────────────────────────
+
+export class ReceivedDocumentNotFoundError extends AppError {
+  readonly code = 'RECEIVED_DOCUMENT_NOT_FOUND';
+  readonly httpStatus = 404;
+  constructor(message = 'Comprobante recibido no encontrado.') { super(message); }
+}
+
+export class ReceivedDocumentXmlMismatchError extends AppError {
+  readonly code = 'RECEIVED_DOCUMENT_XML_MISMATCH';
+  readonly httpStatus = 422;
+  constructor(message = 'El XML no corresponde a esa clave de acceso.') { super(message); }
+}
+
+/** El SRI no respondió algo utilizable (red, timeout, SOAP Fault): se reintenta más tarde, no es un rechazo del comprobante. */
+export class SriUnavailableError extends AppError {
+  readonly code = 'SRI_UNAVAILABLE';
+  readonly httpStatus = 503;
+  constructor(message = 'El SRI no respondió.') { super(message); }
+}

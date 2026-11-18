@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PurchaseOrder } from '../domain/purchase-order.js';
 import type { PurchaseBill } from '../domain/purchase-bill.js';
+import type { ReceivedSriDocument } from '../domain/received-document.js';
 import { quantityToString } from '../domain/money.js';
 import type { DomainEvent, PurchasingSettings } from '../domain/repositories.js';
 import type { Supplier } from '../domain/supplier.js';
@@ -326,4 +327,79 @@ function billPayload(b: PurchaseBill): Record<string, unknown> {
       priceVarianceCents: l.priceVarianceCents,
     })),
   };
+}
+
+/** Un lote de claves importado del reporte del portal del SRI: un evento por lote, no por documento, para no inundar la bitácora. */
+export function sriDocumentsImportedEvent(params: {
+  organizationId: string;
+  batchId: string;
+  source: 'portal_report';
+  total: number;
+  created: number;
+  duplicates: number;
+  rejected: number;
+  needsPortal: number;
+  createdBy: string;
+}): DomainEvent {
+  const { organizationId, batchId, ...payload } = params;
+  return domainEvent({
+    type: 'purchasing.sri_document.imported',
+    aggregateType: 'received_sri_document',
+    aggregateId: batchId,
+    organizationId,
+    payload,
+  });
+}
+
+/** Sin el XML: puede pesar hasta 2 MB y el evento solo anuncia que ya está; quien lo necesite lo pide a la API. */
+function receivedDocumentPayload(d: ReceivedSriDocument): Record<string, unknown> {
+  return {
+    documentId: d.id,
+    accessKey: d.accessKey,
+    documentTypeCode: d.documentTypeCode,
+    issuerRuc: d.issuerRuc,
+    documentNumber: d.documentNumber,
+    issueDate: d.issueDate,
+    totalCents: d.totalCents,
+    status: d.status,
+  };
+}
+
+export function sriDocumentDownloadedEvent(d: ReceivedSriDocument, via: 'web_service' | 'manual'): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.sri_document.downloaded',
+    aggregateType: 'received_sri_document',
+    aggregateId: d.id,
+    organizationId: d.organizationId,
+    payload: { ...receivedDocumentPayload(d), via },
+  });
+}
+
+/** Se dejó de intentar sin XML: no autorizado, más viejo que lo que contesta el web service, o reintentos agotados. */
+export function sriDocumentUnavailableEvent(d: ReceivedSriDocument): DomainEvent {
+  return domainEvent({
+    type: 'purchasing.sri_document.unavailable',
+    aggregateType: 'received_sri_document',
+    aggregateId: d.id,
+    organizationId: d.organizationId,
+    payload: { ...receivedDocumentPayload(d), reason: d.lastError },
+  });
+}
+
+export function sriPortalCredentialsInvalidEvent(params: {
+  organizationId: string;
+  username: string;
+  attemptsLeft: number;
+  maxAttempts: number;
+  blocked: boolean;
+  formUrl: string;
+}): DomainEvent {
+  const { organizationId, ...payload } = params;
+  return domainEvent({
+    type: 'sri.portal.credentials_invalid',
+    aggregateType: 'sri_portal_config',
+    aggregateId: organizationId,
+    organizationId,
+    payload,
+  });
 }

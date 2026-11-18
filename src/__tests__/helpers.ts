@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type {
   ProductCatalogPort,
   ProductInfo,
+  SriAuthorizationPort,
+  SriFetchResult,
   TaxRatePort,
   UnitOfWorkGateway,
   WarehouseCatalogPort,
@@ -43,7 +45,16 @@ import {
   SetSupplierStatusUseCase,
   UpdateSupplierUseCase,
 } from '../application/use-cases/supplier-use-cases.js';
-import { CatalogUnavailableError, ConcurrentUpdateError } from '../domain/errors.js';
+import {
+  AttachReceivedXmlUseCase,
+  FetchReceivedDocumentsUseCase,
+  GetReceivedDocumentsStatusUseCase,
+  GetReceivedDocumentUseCase,
+  ImportSriReportUseCase,
+  ListReceivedDocumentsUseCase,
+} from '../application/use-cases/received-document-use-cases.js';
+import { CatalogUnavailableError, ConcurrentUpdateError, SriUnavailableError } from '../domain/errors.js';
+import { RECEIVED_STATUSES, type ReceivedDocumentStatus, type ReceivedSriDocument } from '../domain/received-document.js';
 import type { PurchaseOrder } from '../domain/purchase-order.js';
 import type { BillLine, PurchaseBill } from '../domain/purchase-bill.js';
 import type {
@@ -55,6 +66,8 @@ import type {
   OrderRepository,
   Page,
   PurchasingSettings,
+  ReceivedDocumentFilters,
+  ReceivedDocumentRepository,
   ReceiptFilters,
   ReceiptRepository,
   SettingsRepository,
@@ -85,6 +98,7 @@ interface Snapshot {
   bills: Map<string, PurchaseBill>;
   billLines: Map<string, BillLine[]>;
   settings: Map<string, PurchasingSettings>;
+  received: Map<string, ReceivedSriDocument>;
   sequences: Map<string, number>;
   billSequences: Map<string, number>;
   receiptSequences: Map<string, number>;
@@ -100,6 +114,7 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
   billMap = new Map<string, PurchaseBill>();
   billLineMap = new Map<string, BillLine[]>();
   settingsMap = new Map<string, PurchasingSettings>();
+  receivedMap = new Map<string, ReceivedSriDocument>();
   sequences = new Map<string, number>();
   billSequences = new Map<string, number>();
   receiptSequences = new Map<string, number>();
@@ -288,6 +303,52 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
     },
   };
 
+  readonly receivedDocuments: ReceivedDocumentRepository = {
+    findById: async (org, id) => {
+      const d = this.receivedMap.get(id);
+      return d && d.organizationId === org ? clone(d) : null;
+    },
+    findExistingKeys: async (org, keys) => {
+      const wanted = new Set(keys);
+      return new Set([...this.receivedMap.values()].filter((d) => d.organizationId === org && wanted.has(d.accessKey)).map((d) => d.accessKey));
+    },
+    list: async (org, f: ReceivedDocumentFilters) => {
+      const q = f.q?.toLowerCase();
+      const all = [...this.receivedMap.values()]
+        .filter((d) => d.organizationId === org && (!f.status || d.status === f.status) && (!f.issuerRuc || d.issuerRuc === f.issuerRuc))
+        .filter((d) => (!f.from || d.issueDate >= f.from) && (!f.to || d.issueDate <= f.to))
+        .filter((d) => !q || d.issuerName.toLowerCase().includes(q) || d.documentNumber.includes(q) || d.accessKey.includes(q))
+        .sort((a, b) => b.issueDate.localeCompare(a.issueDate));
+      // Igual que el repositorio real: el listado no carga el XML.
+      return paginate(all.map((d) => ({ ...clone(d), xml: null })), f.page, f.pageSize);
+    },
+    listDue: async (now, limit) =>
+      [...this.receivedMap.values()]
+        .filter((d) => d.status === 'pending' && d.nextAttemptAt !== null && d.nextAttemptAt <= now)
+        .sort((a, b) => a.nextAttemptAt!.getTime() - b.nextAttemptAt!.getTime())
+        .slice(0, limit)
+        .map((d) => ({ ...clone(d), xml: null })),
+    countByStatus: async (org) => {
+      const counts = Object.fromEntries(RECEIVED_STATUSES.map((s) => [s, 0])) as Record<ReceivedDocumentStatus, number>;
+      for (const d of this.receivedMap.values()) if (d.organizationId === org) counts[d.status]++;
+      return counts;
+    },
+    latestIssueDate: async (org) => {
+      const dates = [...this.receivedMap.values()].filter((d) => d.organizationId === org).map((d) => d.issueDate).sort();
+      return dates.length ? dates[dates.length - 1]! : null;
+    },
+    insertMany: async (docs) => {
+      for (const d of docs) {
+        // Como `ignoreDuplicates`: la clave repetida se omite.
+        const dup = [...this.receivedMap.values()].some((x) => x.organizationId === d.organizationId && x.accessKey === d.accessKey);
+        if (!dup) this.receivedMap.set(d.id, clone(d));
+      }
+    },
+    save: async (d) => {
+      this.receivedMap.set(d.id, clone(d));
+    },
+  };
+
   readonly outbox = {
     add: async (event: DomainEvent) => {
       this.outboxEvents.push(event);
@@ -303,6 +364,7 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
       bills: clone(this.billMap),
       billLines: clone(this.billLineMap),
       settings: clone(this.settingsMap),
+      received: clone(this.receivedMap),
       sequences: clone(this.sequences),
       billSequences: clone(this.billSequences),
       receiptSequences: clone(this.receiptSequences),
@@ -314,6 +376,7 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
       receipts: this.receipts,
       bills: this.bills,
       settings: this.settings,
+      receivedDocuments: this.receivedDocuments,
       outbox: this.outbox,
       commit: async () => {
         this.stack.pop();
@@ -328,6 +391,7 @@ export class InMemoryStore implements UnitOfWorkGateway, UnitOfWork {
         this.billMap = snap.bills;
         this.billLineMap = snap.billLines;
         this.settingsMap = snap.settings;
+        this.receivedMap = snap.received;
         this.sequences = snap.sequences;
         this.billSequences = snap.billSequences;
         this.receiptSequences = snap.receiptSequences;
@@ -373,8 +437,21 @@ export class FakeCatalogs implements ProductCatalogPort, TaxRatePort, WarehouseC
   }
 }
 
+/** SRI de mentira: responde lo que se le programe por clave; `down` simula que no contesta. */
+export class FakeSri implements SriAuthorizationPort {
+  down = false;
+  calls: string[] = [];
+  results = new Map<string, SriFetchResult>();
+  async fetchByAccessKey(accessKey: string): Promise<SriFetchResult> {
+    this.calls.push(accessKey);
+    if (this.down) throw new SriUnavailableError('SRI: sin respuesta en 30 s');
+    return this.results.get(accessKey) ?? { state: 'not_found' };
+  }
+}
+
 export function buildPurchasing(store: InMemoryStore, now: () => Date = () => new Date('2026-10-20T15:00:00Z')) {
   const catalogs = new FakeCatalogs();
+  const sri = new FakeSri();
   const products: ProductCatalogPort = { findById: (org, id) => catalogs.findById(org, id) as Promise<ProductInfo | null> };
   const warehouses: WarehouseCatalogPort = { findById: (org, id) => catalogs.findById(org, id) as never };
   const orderDeps: OrderDeps = { gateway: store, reads: store, clock: now, products, taxRates: catalogs, warehouses };
@@ -408,9 +485,15 @@ export function buildPurchasing(store: InMemoryStore, now: () => Date = () => ne
     postBill: new PostBillUseCase(store, now),
     overrideBill: new OverrideBillUseCase(store, now),
     voidBill: new VoidBillUseCase(store, now),
+    importSriReport: new ImportSriReportUseCase(store, now),
+    fetchReceivedDocuments: new FetchReceivedDocumentsUseCase(store, store, sri, now),
+    attachReceivedXml: new AttachReceivedXmlUseCase(store, now),
+    listReceivedDocuments: new ListReceivedDocumentsUseCase(store),
+    getReceivedDocument: new GetReceivedDocumentUseCase(store),
+    getReceivedDocumentsStatus: new GetReceivedDocumentsStatusUseCase(store),
   };
   const deps: AppDependencies = { useCases: uc, corsOrigin: '*' };
-  return { uc, catalogs, app: createApp(deps) };
+  return { uc, catalogs, sri, app: createApp(deps) };
 }
 
 export const supplierInput = (over: Record<string, unknown> = {}) => ({
