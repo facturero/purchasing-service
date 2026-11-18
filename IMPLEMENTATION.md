@@ -179,9 +179,10 @@ avanza el cursor ni bloquea la organización; con el reintento (3) se recupera e
 - **Portal SRI + captcha:** el captcha no depende del código ni del `sitekey`; el problema era el **perfil de
   Chrome**, que se degrada con el uso y desde el 2026-11-18 se recrea limpio en cada corrida por defecto (ver
   «El captcha: el perfil de Chrome»). Aun así el portal castiga la repetición: conviene un periodo por corrida y
-  el cron reintenta cada hora sin perder el cursor ni bloquear la organización. Para producción falta: (a) crear
-  el Secret con `SRI_PORTAL_ENCRYPTION_KEY` (hoy el valor por defecto es de desarrollo) y referenciarlo en
-  `k8s/deployment.yaml`; (b) decidir el `SRI_PORTAL_PROFILE_DIR` (con el modo `fresh` por defecto no hace falta
+  el cron reintenta cada hora sin perder el cursor ni bloquear la organización. En producción ya está (a): el
+  Secret `purchasing-sri-portal` (clave `encryption-key`) se crea desde `config/secrets.production.enc` y el
+  Deployment lo pasa como `SRI_PORTAL_ENCRYPTION_KEY` (2026-11-18). Quedan: (b) decidir el
+  `SRI_PORTAL_PROFILE_DIR` (con el modo `fresh` por defecto no hace falta
   volumen: el perfil se recrea en cada corrida y en el pod es efímero); (c) decidir si se contrata
   `CAPTCHA_SOLVER=2captcha|anticaptcha` para que sea más fiable.
 - **Sin liquidación de compra (03):** falta el XSD oficial del SRI; sin él no se valida el XML y no se inventa.

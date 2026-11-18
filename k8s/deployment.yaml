@@ -91,6 +91,15 @@ spec:
                 secretKeyRef:
                   name: purchasing-rabbitmq
                   key: url
+            # Clave AES-256-GCM (32 bytes en hex) con la que se cifran las credenciales del
+            # portal del SRI. Va en su propio Secret: si se pierde, las credenciales ya
+            # guardadas dejan de poder descifrarse y hay que volver a guardarlas desde
+            # /purchasing. El Secret lo crea el workflow desde config/secrets.production.enc.
+            - name: SRI_PORTAL_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: purchasing-sri-portal
+                  key: encryption-key
             - name: CORS_ORIGIN
               value: "https://crm.noahsolution.com"
             - name: INTERNAL_USER_ID
