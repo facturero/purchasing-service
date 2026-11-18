@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS builder
+FROM node:24-bookworm-slim AS builder
 ARG NODE_AUTH_TOKEN
 WORKDIR /app
 COPY package*.json ./
@@ -13,7 +13,7 @@ RUN npm run build
 # Chromium (el único navegador que existe para musl) se identifica como «Chromium»,
 # no como «Google Chrome». Se instala el binario oficial de Google, que es lo que
 # ve un contribuyente real.
-FROM node:20-bookworm-slim
+FROM node:24-bookworm-slim
 ARG NODE_AUTH_TOKEN
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
