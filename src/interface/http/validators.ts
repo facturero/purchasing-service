@@ -7,7 +7,7 @@ import { parseQuantity } from '../../domain/money.js';
 import { ValidationError } from '../../domain/errors.js';
 import { RECEIVED_STATUSES, type ReceivedDocumentStatus } from '../../domain/received-document.js';
 
-const UUID = z.string().uuid('El identificador no es válido.');
+const UUID = z.string().guid('El identificador no es válido.');
 const LOCAL_DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha debe tener el formato AAAA-MM-DD.');
 const CENTS = z.number().int('Los importes van en centavos enteros.').min(0, 'El importe no puede ser negativo.').max(Number.MAX_SAFE_INTEGER);
 const optionalText = (max: number) => z.string().trim().max(max).nullish().transform((v) => v || null);
