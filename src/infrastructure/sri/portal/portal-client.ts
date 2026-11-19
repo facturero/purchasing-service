@@ -117,10 +117,22 @@ export class PuppeteerSriPortalClient implements SriPortalPort {
   async goToRecibidos(): Promise<void> {
     const page = this.requirePage();
     await this.ensureLoggedIn();
+    // `consultPeriodOnce` llama a esto por cada periodo. Tras la consulta anterior el
+    // navegador SIGUE en la página de recibidos: volver al home solo añade decenas de
+    // peticiones (CSS/JS/imágenes) sin aportar nada y es lo que hacía que el WAF del SRI
+    // empezara a resetear conexiones (visto 2026-11-19). Si el formulario ya está ahí,
+    // no se navega.
+    const alreadyThere = await page.evaluate(() => !!document.getElementById('frmPrincipal')).catch(() => false);
+    if (alreadyThere) return;
     try {
-      await page.goto('https://srienlinea.sri.gob.ec/sri-en-linea/', { waitUntil: 'networkidle2', timeout: 90000 });
-      await this.humanPause(2000, 4000);
-      await this.ensureLoggedIn();
+      // Igualmente, si el menú ya está en el DOM no recargamos el home: el login deja
+      // la página justo ahí y una recarga es otra ráfaga de peticiones al WAF.
+      const hasMenu = await page.evaluate(() => !!document.querySelector('a.ui-panelmenu-header-link')).catch(() => false);
+      if (!hasMenu) {
+        await page.goto('https://srienlinea.sri.gob.ec/sri-en-linea/', { waitUntil: 'networkidle2', timeout: 90000 });
+        await this.humanPause(2000, 4000);
+        await this.ensureLoggedIn();
+      }
       await page.mouse.move(120 + Math.random() * 300, 120 + Math.random() * 200, { steps: 10 }).catch(() => {});
       const expanded = await page.evaluate(() => {
         const links = Array.from(document.querySelectorAll('a.ui-panelmenu-header-link'));

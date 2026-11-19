@@ -78,11 +78,18 @@ del portal (botón XML de cada fila, POST JSF con `javax.faces.ViewState` + cook
   `persistent` se conserva y solo se borra si la corrida falla.
 - **Cadencia (camino gratis, sin solver de pago):** el portal usa reCAPTCHA v2 Enterprise **invisible** y
   castiga la repetición. Cada periodo gasta un captcha; por eso se sincroniza **de a un periodo por corrida**
-  (`SRI_PORTAL_PERIODS_PER_RUN`, por defecto 2), hacia atrás desde `sync_cursor_period`, se registra el avance
-  y un rechazo de captcha **detiene la corrida** (`last_status='captcha_pending'`) sin bloquear nada. Al
-  terminar la ventana (`SRI_PORTAL_SYNC_MONTHS`, por defecto 12) el cursor vuelve a `NULL` y empieza por el
-  mes actual. Funciona igual re-sincronizar: la importación no duplica (clave de acceso) y el XML ya guardado
-  no se pisa.
+  (`SRI_PORTAL_PERIODS_PER_RUN`, por defecto 1) cada `SRI_PORTAL_CRON_INTERVAL_MINUTES` (por defecto 240),
+  hacia atrás desde `sync_cursor_period`, se registra el avance y un rechazo de captcha **detiene la corrida**
+  (`last_status='captcha_pending'`) sin bloquear nada. Al terminar la ventana (`SRI_PORTAL_SYNC_MONTHS`, por
+  defecto 12) el cursor vuelve a `NULL` y empieza por el mes actual. Funciona igual re-sincronizar: la
+  importación no duplica (clave de acceso) y el XML ya guardado no se pisa.
+- **El WAF del SRI (2026-11-19):** delante del portal hay un F5 BIG-IP ASM (cookie `TS01…`) que filtra por
+  huella del cliente: con un User-Agent no-navegador ni contesta, y con el Chrome automatizado resetea
+  conexiones (`net::ERR_CONNECTION_RESET`) de forma intermitente, sobre todo al cargar el home y sus recursos.
+  No es un baneo de IP (HTTP/1.1 crudo y la URL de comprobantes directa responden 200/302). Por eso se bajó
+  la cadencia y `goToRecibidos()` ya no recarga el home si el formulario sigue en el DOM: menos peticiones al
+  WAF. Si aun así falla, la corrida siguiente reintenta sin bloquear la organización (el error de navegación
+  no cuenta como fallo de credenciales, ver `main.ts`).
 - **No se pulsa «Descargar reporte»:** dispara una segunda consulta con captcha y duplica el riesgo. El TSV se
   arma desde la tabla ya cargada (mismo layout de columnas que el repo viejo: 0 n.º, 1 RUC+razón social,
   2 comprobante, 3 clave, 4 fecha autorización, 5 emisión, 6 subtotal, 7 IVA, 8 total, 9 XML, 10 PDF),
@@ -178,8 +185,9 @@ avanza el cursor ni bloquea la organización; con el reintento (3) se recupera e
 - **Sin autorización para subir:** la retención en la compra y los asientos de compra/retención (construidos y probados, se quedan en el árbol hasta que el dueño diga).
 - **Portal SRI + captcha:** el captcha no depende del código ni del `sitekey`; el problema era el **perfil de
   Chrome**, que se degrada con el uso y desde el 2026-11-18 se recrea limpio en cada corrida por defecto (ver
-  «El captcha: el perfil de Chrome»). Aun así el portal castiga la repetición: conviene un periodo por corrida y
-  el cron reintenta cada hora sin perder el cursor ni bloquear la organización. En producción ya está (a): el
+  «El captcha: el perfil de Chrome»). Aun así el portal castiga la repetición y su WAF resetea conexiones: un
+  periodo por corrida y el cron cada 4 horas, sin perder el cursor ni bloquear la organización. En producción
+  ya está (a): el
   Secret `purchasing-sri-portal` (clave `encryption-key`) se crea desde `config/secrets.production.enc` y el
   Deployment lo pasa como `SRI_PORTAL_ENCRYPTION_KEY` (2026-11-18). Quedan: (b) decidir el
   `SRI_PORTAL_PROFILE_DIR` (con el modo `fresh` por defecto no hace falta

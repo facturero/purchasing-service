@@ -24,13 +24,16 @@ const schema = z.object({
   RECEIVED_DOCS_FETCH_INTERVAL_MINUTES: z.coerce.number().int().min(0).default(30),
   // SRI Portal sync
   SRI_PORTAL_ENABLED: z.coerce.boolean().default(false),
-  SRI_PORTAL_CRON_INTERVAL_MINUTES: z.coerce.number().int().min(5).default(60),
+  // El WAF del SRI resetea conexiones de forma intermitente cuando se insiste (visto
+  // 2026-11-19). Espaciar las corridas baja el número de logins y de cargas del portal.
+  SRI_PORTAL_CRON_INTERVAL_MINUTES: z.coerce.number().int().min(5).default(240),
   // Ventana de meses hacia atrás que se recorre (incluye el mes actual). El cursor
   // guardado en la base avanza un periodo por corrida hasta cubrirla y vuelve a empezar.
   SRI_PORTAL_SYNC_MONTHS: z.coerce.number().int().min(1).max(36).default(12),
-  // Periodos que intenta cada corrida. Cada periodo gasta un captcha: con el solver en
-  // `manual` conviene 1-2 y espaciar las corridas (el portal castiga la repetición).
-  SRI_PORTAL_PERIODS_PER_RUN: z.coerce.number().int().min(1).max(12).default(2),
+  // Periodos que intenta cada corrida. Cada periodo gasta un captcha y carga el portal:
+  // con el solver en `manual` conviene 1 y espaciar las corridas (el portal castiga la
+  // repetición y el WAF empieza a resetear conexiones si se insiste).
+  SRI_PORTAL_PERIODS_PER_RUN: z.coerce.number().int().min(1).max(12).default(1),
   SRI_PORTAL_ENCRYPTION_KEY: z.string().min(16).default('dev-sri-portal-key-change-me-32bytes'),
   // Opcional: si se define se falsea el UA, y reCAPTCHA Enterprise lo detecta como
   // incoherente con Sec-CH-UA/navigator.platform. Solo para depurar; en serio, vacío.
