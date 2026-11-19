@@ -1,7 +1,7 @@
 import type { CaptchaSolver, SriPortalPeriodResult, SriPortalPort } from '../../../application/ports.js';
 import type { PortalSession } from './portal-auth.js';
 import { createPortalSession, hasLoginForm, isAuthUrl, loginToPortal, randomDelay } from './portal-auth.js';
-import { SriPortalAuthError, SriPortalCaptchaError } from '../../../domain/sri-portal.js';
+import { SriPortalCaptchaError } from '../../../domain/sri-portal.js';
 import { config } from '../../config.js';
 
 /** Una fila de la tabla de comprobantes recibidos, tal como la muestra el portal. */
@@ -62,7 +62,9 @@ export class PuppeteerSriPortalClient implements SriPortalPort {
   }
 
   private requirePage(): any {
-    if (!this.session || !this.loggedIn) throw new SriPortalAuthError('No hay sesión activa');
+    // Estado interno, no credenciales: un error normal para que no cuente como intento
+    // de login fallido (ver `loginToPortal`).
+    if (!this.session || !this.loggedIn) throw new Error('No hay sesión activa en el portal del SRI');
     return this.session.page;
   }
 
@@ -71,7 +73,7 @@ export class PuppeteerSriPortalClient implements SriPortalPort {
     const page = this.requirePage();
     if (!isAuthUrl(page.url()) && !(await hasLoginForm(page))) return;
     if (!this.session?.username || !this.session?.password) {
-      throw new SriPortalAuthError('Sesión expirada y sin credenciales para reintentar');
+      throw new Error('Sesión del portal SRI expirada y sin credenciales para reintentar');
     }
     await loginToPortal(this.session, this.session.username, this.session.password);
   }

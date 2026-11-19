@@ -99,7 +99,7 @@ export async function createPortalSession(profileKey?: string): Promise<PortalSe
       } catch {}
     }
   }
-  if (!executablePath) throw new SriPortalAuthError('No se encontró un navegador para el portal del SRI');
+  if (!executablePath) throw new Error('No se encontró un navegador para el portal del SRI');
 
   // Perfil de Chrome por RUC. Por defecto arranca **limpio en cada corrida**: un perfil
   // usado deja de pasar el captcha al cabo de un rato (comprobado el 2026-11-18: uno que
@@ -298,64 +298,71 @@ async function waitLoginResult(page: any, timeoutMs = 45000): Promise<boolean> {
  * Login con el mismo recorrido del repo viejo:
  * sri-en-linea → clic en iniciar sesión → credenciales → ingreso.
  * Keycloak a veces pide un segundo login (SSO app-sri-claves-angular); se reintenta.
+ *
+ * `SriPortalAuthError` se lanza **solo** con evidencia de credenciales inválidas
+ * (`hasCredentialError`). Un fallo de Chrome (navegación, protocolo del DevTools) se
+ * propaga como error normal: no debe contar para el bloqueo por intentos de login.
  */
 export async function loginToPortal(session: PortalSession, username: string, password: string): Promise<void> {
   const { page } = session;
   session.username = username;
   session.password = password;
-  try {
-    await page.goto('https://srienlinea.sri.gob.ec/sri-en-linea/', { waitUntil: 'networkidle2', timeout: 90000 });
-    await randomDelay(2000, 3500);
 
-    // Si hay enlace de inicio de sesión (no autenticado), entrar al formulario.
-    if (!(await hasLoginForm(page))) {
-      const loginLink = await page.$('a[href="/sri-en-linea/contribuyente/perfil"]');
-      if (loginLink) {
-        await humanClick(page, 'a[href="/sri-en-linea/contribuyente/perfil"]').catch(() => {});
-        await randomDelay(2500, 4500);
-      }
-    }
+  await page.goto('https://srienlinea.sri.gob.ec/sri-en-linea/', { waitUntil: 'networkidle2', timeout: 90000 });
+  await randomDelay(2000, 3500);
 
-    if (!(await hasLoginForm(page))) {
-      const cookieBtn = await page.$('button');
-      if (cookieBtn) {
-        // Aceptar banner de cookies si aparece
-        await page.evaluate(() => {
-          const btn = Array.from(document.querySelectorAll('button, a')).find((b: any) =>
-            /aceptar|accept|entendido/i.test((b.textContent || '').trim()),
-          );
-          if (btn) (btn as any).click();
-        }).catch(() => {});
-        await randomDelay(500, 900);
-      }
+  // Si hay enlace de inicio de sesión (no autenticado), entrar al formulario.
+  if (!(await hasLoginForm(page))) {
+    const loginLink = await page.$('a[href="/sri-en-linea/contribuyente/perfil"]');
+    if (loginLink) {
+      await humanClick(page, 'a[href="/sri-en-linea/contribuyente/perfil"]').catch(() => {});
+      await randomDelay(2500, 4500);
     }
+  }
 
-    if (!(await hasLoginForm(page))) {
-      // Ya había sesión iniciada.
-      return;
+  if (!(await hasLoginForm(page))) {
+    const cookieBtn = await page.$('button');
+    if (cookieBtn) {
+      // Aceptar banner de cookies si aparece
+      await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button, a')).find((b: any) =>
+          /aceptar|accept|entendido/i.test((b.textContent || '').trim()),
+        );
+        if (btn) (btn as any).click();
+      }).catch(() => {});
+      await randomDelay(500, 900);
     }
+  }
 
-    await fillCredentials(page, username, password);
-    await submitLogin(page);
-    if (!(await waitLoginResult(page))) {
-      if (await hasCredentialError(page)) throw new SriPortalAuthError('Usuario o contraseña incorrectos');
-      // Segundo paso SSO
-      for (let retry = 0; retry < 3; retry++) {
-        if (!(await hasLoginForm(page)) || !isAuthUrl(page.url())) break;
-        await randomDelay(800, 1600);
-        await fillCredentials(page, username, password);
-        await submitLogin(page);
-        if (await waitLoginResult(page)) break;
-        if (await hasCredentialError(page)) break;
-      }
-    }
+  if (!(await hasLoginForm(page))) {
+    // Ya había sesión iniciada.
+    return;
+  }
 
-    if ((await hasLoginForm(page)) || isAuthUrl(page.url())) {
-      throw new SriPortalAuthError('Login fallido');
+  await fillCredentials(page, username, password);
+  await submitLogin(page);
+  if (!(await waitLoginResult(page))) {
+    if (await hasCredentialError(page)) throw new SriPortalAuthError('Usuario o contraseña incorrectos');
+    // Segundo paso SSO
+    for (let retry = 0; retry < 3; retry++) {
+      if (!(await hasLoginForm(page)) || !isAuthUrl(page.url())) break;
+      await randomDelay(800, 1600);
+      await fillCredentials(page, username, password);
+      await submitLogin(page);
+      if (await waitLoginResult(page)) break;
+      if (await hasCredentialError(page)) break;
     }
-  } catch (err: any) {
-    if (err instanceof SriPortalAuthError) throw err;
-    throw new SriPortalAuthError(err.message);
+  }
+
+  if ((await hasLoginForm(page)) || isAuthUrl(page.url())) {
+    // Solo es un fallo de credenciales si el portal lo dice con un mensaje explícito.
+    // Quedarse en el formulario también pasa por una navegación a medias o un Keycloak
+    // lento; contar eso como credenciales malas bloqueó la sincronización por 3 fallos
+    // transitorios de Chrome (visto el 2026-11-19). El resto de errores se propaga tal
+    // cual (sin envolverlo en `SriPortalAuthError`), para que un fallo de Chrome no
+    // cuente para el bloqueo por intentos de login (ver `main.ts`).
+    if (await hasCredentialError(page)) throw new SriPortalAuthError('Usuario o contraseña incorrectos');
+    throw new Error('No se completó el inicio de sesión en el portal del SRI');
   }
 }
 

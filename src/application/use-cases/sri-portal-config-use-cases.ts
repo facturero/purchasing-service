@@ -1,5 +1,5 @@
 import { encrypt } from '../../infrastructure/crypto/encrypt.js';
-import { SriPortalBadCredentialsError, SriPortalBlockedError, SriPortalNotConfiguredError } from '../../domain/sri-portal.js';
+import { SriPortalAuthError, SriPortalBadCredentialsError, SriPortalBlockedError, SriPortalNotConfiguredError } from '../../domain/sri-portal.js';
 import type { SriPortalConfigRepository, UnitOfWorkGateway } from '../ports.js';
 import { createSriPortalClient } from '../../infrastructure/sri/portal/index.js';
 import { config } from '../../infrastructure/config.js';
@@ -63,6 +63,10 @@ export class SaveSriPortalCredentialsUseCase {
       await client.close();
     } catch (err: any) {
       await client.close();
+      // Un fallo que no sea de credenciales (Chrome, navegación, sesión del portal) no se
+      // cuenta como intento fallido: no debe acercar el bloqueo de la cuenta. Solo
+      // `loginToPortal` lanza `SriPortalAuthError`, y solo con credenciales inválidas.
+      if (!(err instanceof SriPortalAuthError)) throw err;
       const currentState = await this.repo.get(params.organizationId);
       if (currentState?.blockedBySri && (currentState.loginFailCount || 0) >= config.SRI_PORTAL_MAX_LOGIN_ATTEMPTS) {
         const formUrl = `${config.CRM_BASE_URL}/purchasing/received-documents`;
