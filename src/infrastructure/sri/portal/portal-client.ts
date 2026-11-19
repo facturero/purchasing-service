@@ -113,72 +113,89 @@ export class PuppeteerSriPortalClient implements SriPortalPort {
     throw new Error('No se cargó el formulario de Comprobantes electrónicos recibidos');
   }
 
-  /** Navega a "Comprobantes electrónicos recibidos" (menú PrimeFaces, fallback a URL directa). */
+  /**
+   * Navega a "Comprobantes electrónicos recibidos" SOLO con clics del menú.
+   * Las URL directas al JSF (y al /contribuyente/... que da 404) se eliminaron:
+   * abren la vista "Ha ocurrido un error" de JSF cuando el ViewState es viejo, y
+   * además disparan el WAF del SRI (visto 2026-11-19). Para recuperarse de un error
+   * se usa "atrás" del navegador o se recarga la MISMA dirección, nunca otra ruta.
+   */
   async goToRecibidos(): Promise<void> {
     const page = this.requirePage();
-    await this.ensureLoggedIn();
-    // `consultPeriodOnce` llama a esto por cada periodo. Tras la consulta anterior el
-    // navegador SIGUE en la página de recibidos: volver al home solo añade decenas de
-    // peticiones (CSS/JS/imágenes) sin aportar nada y es lo que hacía que el WAF del SRI
-    // empezara a resetear conexiones (visto 2026-11-19). Si el formulario ya está ahí,
-    // no se navega.
-    const alreadyThere = await page.evaluate(() => !!document.getElementById('frmPrincipal')).catch(() => false);
-    if (alreadyThere) return;
-    try {
-      // Igualmente, si el menú ya está en el DOM no recargamos el home: el login deja
-      // la página justo ahí y una recarga es otra ráfaga de peticiones al WAF.
-      const hasMenu = await page.evaluate(() => !!document.querySelector('a.ui-panelmenu-header-link')).catch(() => false);
-      if (!hasMenu) {
-        await page.goto('https://srienlinea.sri.gob.ec/sri-en-linea/', { waitUntil: 'networkidle2', timeout: 90000 });
-        await this.humanPause(2000, 4000);
-        await this.ensureLoggedIn();
-      }
-      await page.mouse.move(120 + Math.random() * 300, 120 + Math.random() * 200, { steps: 10 }).catch(() => {});
-      const expanded = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a.ui-panelmenu-header-link'));
-        const link = links.find((a) => (a.textContent || '').includes('FACTURACIÓN ELECTRÓNICA'));
-        if (link) { (link as any).click(); return true; }
-        return false;
-      });
-      if (expanded) await this.humanPause(900, 1800);
-      const clicked = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a.ui-menuitem-link'));
-        const link = links.find((a) => {
-          const href = (a as any).href || '';
-          return (a.textContent || '').includes('Comprobantes electrónicos recibidos') || href.includes('redireccion=57');
-        });
-        if (link) { (link as any).click(); return true; }
-        return false;
-      });
-      if (clicked) {
-        await this.humanPause(2500, 4500);
-        await this.waitForRecibidosForm();
-        return;
-      }
-    } catch { /* fallback */ }
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      await this.ensureLoggedIn();
+      // Tras una consulta el navegador sigue en el formulario: no hay que navegar.
+      if (await page.evaluate(() => !!document.getElementById('frmPrincipal')).catch(() => false)) return;
 
-    const urls = [
-      'https://srienlinea.sri.gob.ec/comprobantes-electronicos-internet/pages/consultas/recibidos/comprobantesRecibidos.jsf',
-      'https://srienlinea.sri.gob.ec/sri-en-linea/contribuyente/comprobantes-recibidos',
-    ];
-    for (const url of urls) {
+      const jsfError = await page.evaluate(() =>
+        /ha ocurrido un error|se ha producido un error|error 500/i.test(document.body?.innerText || ''),
+      ).catch(() => false);
+      if (jsfError) {
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        await this.humanPause(1500, 2500);
+        continue;
+      }
+
+      let hasMenu = false;
+      for (let i = 0; i < 12; i++) {
+        hasMenu = await page.evaluate(() => !!document.querySelector('a.ui-panelmenu-header-link')).catch(() => false);
+        if (hasMenu) break;
+        await this.delay(1200);
+      }
+      if (!hasMenu) {
+        // Sin menú: recargar la dirección ACTUAL, sin inventar una ruta.
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        await this.humanPause(2000, 3000);
+        continue;
+      }
+
+      const clickByText = async (selector: string, matches: (text: string, href: string) => boolean) => {
+        const handles = await page.$$(selector).catch(() => [] as any[]);
+        for (const handle of handles) {
+          const info = await handle.evaluate((el: any) => ({
+            text: ((el.innerText || el.textContent || '') as string).trim(),
+            href: (el.href || '') as string,
+          })).catch(() => null);
+          if (!info || !matches(info.text, info.href)) continue;
+          const box = await handle.boundingBox().catch(() => null);
+          if (box && box.width > 0 && box.height > 0) {
+            const x = box.x + box.width * 0.5;
+            const y = box.y + box.height * 0.5;
+            await page.mouse.move(x - 40, y - 20, { steps: 6 }).catch(() => {});
+            await this.humanPause(80, 180);
+            await page.mouse.move(x, y, { steps: 6 }).catch(() => {});
+            await page.mouse.click(x, y, { delay: 30 + Math.floor(Math.random() * 50) }).catch(() => {});
+          } else {
+            // El menú PrimeFaces está en el DOM pero colapsado: boundingBox es nulo.
+            // Seguir siendo un clic (nunca una URL), ahora sobre el elemento del DOM.
+            await handle.evaluate((el: any) => el.click()).catch(() => {});
+          }
+          return true;
+        }
+        return false;
+      };
+
+      await page.mouse.move(120 + Math.random() * 300, 120 + Math.random() * 200, { steps: 10 }).catch(() => {});
+      const expanded = await clickByText('a.ui-panelmenu-header-link', (t) => t.includes('FACTURACIÓN ELECTRÓNICA'));
+      if (expanded) await this.humanPause(900, 1800);
+      const clicked = await clickByText('a.ui-menuitem-link', (t, href) =>
+        t.includes('Comprobantes electrónicos recibidos') || href.includes('redireccion=57'));
+      if (!clicked) continue;
+      await this.humanPause(2500, 4500);
+
+      // Algunos enlaces del menú abren pestaña nueva; adoptarla para no quedarse en la vieja.
+      const pages = await this.session?.browser.pages().catch(() => []) || [];
+      const opened = pages.find((p: any) => p !== page && p.url() !== 'about:blank');
+      if (opened) this.session!.page = opened;
+
       try {
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 90000 });
-        await this.humanPause(2500, 4500);
-        await this.ensureLoggedIn();
         await this.waitForRecibidosForm();
         return;
       } catch {
-        try {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
-          await this.humanPause(2500, 4500);
-          await this.ensureLoggedIn();
-          await this.waitForRecibidosForm();
-          return;
-        } catch {}
+        await this.humanPause(1000, 2000);
       }
     }
-    throw new Error('No se pudo navegar a Comprobantes electrónicos recibidos');
+    throw new Error('No se pudo navegar a Comprobantes electrónicos recibidos (solo clics)');
   }
 
   /**
@@ -317,6 +334,17 @@ export class PuppeteerSriPortalClient implements SriPortalPort {
       await this.humanPause(200, 500);
     } catch {}
 
+    // La tabla del periodo ANTERIOR sigue en el DOM mientras PrimeFaces responde. Si
+    // sólo miramos "hay filas", un mes nuevo se da por resuelto con los datos viejos
+    // (visto 2026-11-19: octubre devolvió las 12 filas de noviembre). Guardamos una
+    // firma de la tabla y esperamos a que CAMBIE antes de aceptarla.
+    const beforeSignature = await page.evaluate(() => {
+      const tbody = document.getElementById('frmPrincipal:tablaCompRecibidos_data');
+      const rows = Array.from(tbody?.querySelectorAll('tr[data-ri]') || []);
+      const keys = rows.slice(0, 3).map((r) => (r.querySelectorAll('td')[3] as HTMLElement | undefined)?.innerText || '');
+      return `${rows.length}:${keys.join('|')}`;
+    }).catch(() => '0:');
+
     const externalToken = await this.solveCaptchaExternally();
     await this.humanPause(400, 900);
 
@@ -356,27 +384,58 @@ export class PuppeteerSriPortalClient implements SriPortalPort {
       }
     }
 
-    // esperar tabla o mensaje de captcha
-    const start = Date.now();
+    // Esperar a que la tabla REFRESQUE (firma distinta) o a que aparezca "Captcha
+    // incorrecta". Aceptar filas sin comprobar el refresco hacía que un mes leyera los
+    // datos del anterior. Un mes realmente vacío también cambia la firma (pasa a 0 filas).
     let rows = 0;
     let captchaMsg: string | null = null;
-    while (Date.now() - start < 30000) {
-      await this.delay(1200);
-      const st = await page.evaluate(() => {
-        const tbody = document.getElementById('frmPrincipal:tablaCompRecibidos_data');
-        return tbody ? tbody.querySelectorAll('tr[data-ri]').length : 0;
-      }).catch(() => 0);
-      rows = st;
-      if (rows > 0) break;
-      captchaMsg = await this.readCaptchaMessage();
-      if (captchaMsg) break;
-      // si no hay resultados, el portal a veces deja la tabla vacía sin mensaje: seguir esperando un poco
+    let refreshed = false;
+    for (let round = 1; round <= 2 && !refreshed; round++) {
+      const start = Date.now();
+      let changedAt = 0;
+      let lastSig = '';
+      let stable = 0;
+      while (Date.now() - start < 45000) {
+        await this.delay(700);
+        const st = await page.evaluate(() => {
+          const tbody = document.getElementById('frmPrincipal:tablaCompRecibidos_data');
+          const all = Array.from(tbody?.querySelectorAll('tr[data-ri]') || []);
+          const keys = all.slice(0, 3).map((r) => (r.querySelectorAll('td')[3] as HTMLElement | undefined)?.innerText || '');
+          return { rows: all.length, signature: `${all.length}:${keys.join('|')}` };
+        }).catch(() => ({ rows: 0, signature: '0:' }));
+        rows = st.rows;
+        if (st.signature !== lastSig) {
+          lastSig = st.signature;
+          changedAt = Date.now();
+          stable = 0;
+        } else if (changedAt) {
+          stable++;
+        }
+        // PrimeFaces vacía la tabla un instante mientras responde: aceptar el primer
+        // cambio daba un "0 filas" falso (octubre-2026). Exigir firma estable ~2 s.
+        if (changedAt && lastSig !== beforeSignature && stable >= 2 && Date.now() - changedAt >= 1500) {
+          refreshed = true;
+          break;
+        }
+        captchaMsg = await this.readCaptchaMessage();
+        if (captchaMsg) break;
+      }
+      if (captchaMsg || refreshed) break;
+      // No llegó a ejecutarse: reenviar una vez con token/ViewState nuevo.
+      await page.evaluate(() => {
+        const fn = (window as any).rcBuscar;
+        if (typeof fn === 'function') fn();
+        else (document.getElementById('frmPrincipal:btnBuscar') as HTMLElement | null)?.click();
+      }).catch(() => {});
+      await this.humanPause(1500, 2500);
     }
     if (captchaMsg) {
       throw new SriPortalCaptchaError(`Portal SRI rechazó el captcha (${captchaMsg})`);
     }
+    if (!refreshed) {
+      throw new Error(`La tabla no se actualizó tras Consultar ${year}-${String(month).padStart(2, '0')}`);
+    }
     await this.humanPause(400, 900);
-    // rows === 0 sin mensaje: el periodo no tiene comprobantes, no es error
     return rows;
   }
 

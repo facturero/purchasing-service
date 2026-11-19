@@ -304,6 +304,25 @@ async function waitLoginResult(page: any, timeoutMs = 45000): Promise<boolean> {
  * propaga como error normal: no debe contar para el bloqueo por intentos de login.
  */
 export async function loginToPortal(session: PortalSession, username: string, password: string): Promise<void> {
+  // `humanType`/`humanClick` usan `DOM.describeNode`; si la página navega mientras tanto
+  // Chrome invalida el contexto y lanza "Protocol error (DOM.describeNode): Cannot find
+  // context with specified id". Es transitorio (visto 2026-11-19, ~1 de cada 2 logins) y
+  // tumbaba la corrida entera. Un reintento lo resuelve casi siempre.
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await loginToPortalOnce(session, username, password);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (err instanceof SriPortalAuthError) throw err;
+      if (attempt < 3) await randomDelay(1500, 3000);
+    }
+  }
+  throw lastErr;
+}
+
+async function loginToPortalOnce(session: PortalSession, username: string, password: string): Promise<void> {
   const { page } = session;
   session.username = username;
   session.password = password;
